@@ -1,0 +1,26 @@
+# 统一换行：仓库内一律 LF，Windows 脚本也不再用 CRLF。
+#
+# 为什么值得单独一个文件：`.ps1` / `.py` / `.ts` 混在一起时，任何一个编辑器
+# 都可能悄悄把某一个改成 CRLF，然后 `git diff` 变成"整文件重写"，真正的一行
+# 改动就此淹没。`*.ps1` 显式声明 `eol=lf` 也是安全的：PowerShell 5.1 与 7 都能
+# 正确执行 LF 结尾的脚本（Windows 上 `scripts/parse_check.ps1` 已按此验证）。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.docx binary
+*.zip binary
+
+*.ps1 text eol=lf
+*.py text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

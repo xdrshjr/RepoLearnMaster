@@ -1,0 +1,67 @@
+[project]
+name = "repolearn"
+version = "0.1.0"
+description = "RepoLearn — 输入 GitHub 仓库，生成三层 AI 带读课程"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.30",
+  "pydantic>=2.7",
+  "pydantic-settings>=2.3",
+  "sqlalchemy[asyncio]>=2.0.30",
+  "aiosqlite>=0.20",
+  "alembic>=1.13",
+  "httpx>=0.27",
+  "structlog>=24.1",
+  "cryptography>=42",
+  "jsonschema>=4.22",
+  "langgraph>=0.2.60",
+  "langgraph-checkpoint-sqlite>=2.0",
+  "python-multipart>=0.0.9",
+  "pypdf>=4.2",
+]
+
+[project.optional-dependencies]
+analysis = ["tree-sitter-language-pack>=0.4"]
+audio = ["mutagen>=1.47"]
+pdf = ["playwright>=1.45"]
+dev = [
+  "pytest>=8.2",
+  "pytest-asyncio>=0.23",
+  "respx>=0.21",
+  "ruff>=0.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# 关键（spec P0-5）：把 apps/api 下的包显式纳入 wheel，否则 `python -m repolearn.cli` 不可达。
+[tool.hatch.build.targets.wheel]
+packages = ["apps/api/repolearn"]
+
+# 包在 `apps/api/repolearn`，但 wheel 里必须叫 `repolearn`。
+# 没有这条映射，hatch 会产出一个空的 editable 安装（`import repolearn` 直接失败），
+# 而 `pip install -e .` 还是"成功"的——这是最容易被误判为"环境问题"的配置错误。
+[tool.hatch.build.targets.wheel.sources]
+"apps/api/repolearn" = "repolearn"
+
+[tool.pytest.ini_options]
+pythonpath = ["apps/api"]
+testpaths = ["apps/api/tests", "tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+src = ["apps/api"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "B008"]
+
+[tool.mypy]
+python_version = "3.11"
+mypy_path = "apps/api"
+ignore_missing_imports = true

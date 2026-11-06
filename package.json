@@ -1,0 +1,20 @@
+{
+  "name": "repolearn",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@12.18.0",
+  "scripts": {
+    "dev": "pnpm --filter @repolearn/web dev",
+    "build": "pnpm -r --filter @repolearn/contracts build && pnpm --filter @repolearn/web build",
+    "start": "pnpm --filter @repolearn/web start",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "contracts": "pnpm --filter @repolearn/contracts gen",
+    "kernel": "pnpm --filter @repolearn/agent-kernel dev",
+    "e2e": "pnpm --filter @repolearn/web e2e",
+    "contracts:check": "pnpm -F @repolearn/contracts test"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

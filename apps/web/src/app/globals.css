@@ -1,0 +1,114 @@
+@import 'tailwindcss';
+@import '../styles/tokens.css';
+
+/*
+ * Tailwind v4 consumes the 24 design tokens instead of re-declaring colours.
+ * `@theme inline` keeps `var(--bg)`-style references live, so a token change in
+ * tokens.css propagates to every utility class without touching components
+ * (spec §7.1 / §2.3).
+ */
+@theme inline {
+  --color-bg: var(--bg);
+  --color-bg-elevated: var(--bg-elevated);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+
+  --color-text: var(--text);
+  --color-text-muted: var(--text-muted);
+  --color-text-dim: var(--text-dim);
+
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+
+  --color-code-bg: var(--code-bg);
+  --color-code-line-hl: var(--code-line-hl);
+
+  --radius-sm: var(--radius-sm);
+  --radius-DEFAULT: var(--radius);
+  --radius-lg: var(--radius-lg);
+
+  --shadow-soft: var(--shadow-soft);
+
+  --font-sans: var(--font-ui);
+  --font-mono: var(--font-mono);
+
+  --text-2xs: var(--text-2xs);
+  --text-xs: var(--text-xs);
+  --text-sm: var(--text-sm);
+  --text-base: var(--text-base);
+  --text-lg: var(--text-lg);
+  --text-xl: var(--text-xl);
+  --text-2xl: var(--text-2xl);
+  --text-3xl: var(--text-3xl);
+}
+
+@layer base {
+  a {
+    color: var(--accent);
+    text-decoration: none;
+  }
+
+  a:hover {
+    color: var(--accent-strong);
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    color: var(--text);
+    font-weight: 600;
+    line-height: 1.3;
+  }
+}
+
+@layer utilities {
+  /* used by the read-only IDE highlight layer */
+  .rl-line-focus {
+    background: var(--code-line-hl);
+    box-shadow: inset 3px 0 0 0 var(--accent);
+  }
+
+  .rl-line-evidence {
+    text-decoration: underline wavy var(--info);
+    text-underline-offset: 4px;
+  }
+
+  .rl-scroll-thin {
+    scrollbar-width: thin;
+  }
+}
+
+/* Decoration classes applied through Monaco's deltaDecorations (§7.4). They must
+   live outside any cascade layer so Monaco's own rules cannot override them. */
+.rl-deco-focus {
+  background: var(--code-line-hl);
+}
+
+.rl-deco-focus-bar {
+  border-left: 3px solid var(--accent);
+  margin-left: 2px;
+}
+
+.rl-deco-note-glyph::after {
+  content: '●';
+  color: var(--accent);
+  font-size: 9px;
+  margin-left: 2px;
+}
+
+.rl-deco-note-mark {
+  border-left: 2px solid var(--accent-strong);
+}
+
+.rl-deco-evidence {
+  text-decoration: underline wavy var(--info);
+  text-underline-offset: 4px;
+}

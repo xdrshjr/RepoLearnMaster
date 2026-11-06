@@ -1,0 +1,48 @@
+# --- 环境与密钥 ---
+.env
+.env.local
+*.pem
+
+# --- 运行时数据 ---
+var/
+.run/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Python ---
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# --- Node / Next.js ---
+node_modules/
+.next/
+out/
+dist/
+.turbo/
+*.tsbuildinfo
+apps/web/src/lib/api/schema.d.ts.bak
+
+# --- 测试产物 ---
+test-results/
+playwright-report/
+.playwright/
+coverage/
+htmlcov/
+
+# --- 编排/运行时元数据（不属于产品代码）---
+.agentmesh/
+
+# --- 编辑器 / 系统 ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

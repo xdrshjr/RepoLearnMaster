@@ -1,0 +1,17 @@
+{
+  "default_branch": "main",
+  "description": "A programming framework for agentic AI",
+  "full_name": "microsoft/autogen",
+  "html_url": "https://github.com/microsoft/autogen",
+  "language": "Python",
+  "license": {
+    "spdx_id": "MIT"
+  },
+  "name": "autogen",
+  "owner": {
+    "login": "microsoft"
+  },
+  "private": false,
+  "size": 24000,
+  "stargazers_count": 32000
+}

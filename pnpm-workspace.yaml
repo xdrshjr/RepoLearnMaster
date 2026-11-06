@@ -1,0 +1,14 @@
+packages:
+  - "apps/web"
+  - "packages/contracts"
+  - "services/agent-kernel"
+
+# pnpm 12 只从本文件读取构建脚本白名单（package.json 的 pnpm 字段已不再生效）。
+# 这三个包必须允许执行安装脚本：
+#   esbuild       —— vitest / vite 的打包器，不跑 postinstall 会缺少平台二进制
+#   isolated-vm   —— next 间接依赖，需要 node-gyp 预编译或回退编译
+#   sharp         —— next image 优化（可选依赖，缺失时 next 会自行降级）
+allowBuilds:
+  esbuild: true
+  isolated-vm: true
+  sharp: true

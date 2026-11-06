@@ -1,0 +1,39 @@
+{
+  "key": "trace_1.1",
+  "steps": [
+    {
+      "certainty": "source_fact",
+      "evidence": [
+        {
+          "file": "autogen/agentchat/groupchat.py",
+          "line_end": 12,
+          "line_start": 10,
+          "symbol": "run"
+        }
+      ],
+      "index": 0,
+      "title": "GroupChat.run 收到初始消息",
+      "variables": [
+        {
+          "name": "initial_message",
+          "note": "示例值，非真实运行结果",
+          "value": "'hi'"
+        }
+      ]
+    },
+    {
+      "certainty": "static_inference",
+      "evidence": [
+        {
+          "file": "autogen/agentchat/conversable_agent.py",
+          "line_end": 12,
+          "line_start": 10
+        }
+      ],
+      "index": 1,
+      "title": "逐 agent 调用 send",
+      "variables": []
+    }
+  ],
+  "title": "GroupChat → ConversableAgent → generate_reply"
+}

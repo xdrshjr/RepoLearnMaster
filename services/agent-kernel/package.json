@@ -1,0 +1,27 @@
+{
+  "name": "@repolearn/agent-kernel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "RepoLearn Agent Kernel — 包裹 @aragon-agent/core 的内部 sidecar",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "node --watch --experimental-strip-types src/server.ts",
+    "start": "node --experimental-strip-types src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "test": "node --experimental-strip-types --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "fastify": "^4.28.1",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.23.5"
+  },
+  "optionalDependencies": {
+    "@aragon-agent/core": "^0.2.63"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

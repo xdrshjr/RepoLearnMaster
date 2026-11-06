@@ -1,0 +1,155 @@
+/* ============================================================================
+ * RepoLearn design tokens — spec §7.1
+ *
+ * The list below is the *closed* token set: 24 custom properties, nothing else
+ * is allowed to introduce a raw hex value into components. The spec enumerates
+ * 23 design values plus the adjustable code font size (§7.1 “代码字号可调 12–16”),
+ * which is the 24th.
+ *
+ *  1 --bg              2 --bg-elevated     3 --surface          4 --surface-2
+ *  5 --border          6 --border-strong   7 --accent           8 --accent-strong
+ *  9 --accent-soft    10 --text           11 --text-muted      12 --text-dim
+ * 13 --warn           14 --danger         15 --info            16 --code-bg
+ * 17 --code-line-hl   18 --radius-sm      19 --radius          20 --radius-lg
+ * 21 --shadow-soft    22 --font-ui        23 --font-mono       24 --code-font-size
+ * ========================================================================== */
+
+:root {
+  /* surfaces */
+  --bg: #0b0f0e;
+  --bg-elevated: #111715;
+  --surface: #161d1b;
+  --surface-2: #1b2320;
+  --border: #2a3330;
+  --border-strong: #3a4642;
+
+  /* accent */
+  --accent: #3ecf8e;
+  --accent-strong: #2fb37a;
+  --accent-soft: rgba(62, 207, 142, 0.12);
+
+  /* text */
+  --text: #e6edea;
+  --text-muted: #9fb0aa;
+  --text-dim: #6d837c;
+
+  /* status */
+  --warn: #e8b44a;
+  --danger: #e5645c;
+  --info: #6ca8f5;
+
+  /* code */
+  --code-bg: #0f1513;
+  --code-line-hl: rgba(62, 207, 142, 0.1);
+
+  /* geometry */
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 18px;
+  --shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.35);
+
+  /* type */
+  --font-ui: Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
+  --code-font-size: 13px;
+
+  /* derived typography scale (§7.1: 12 / 13 / 14 / 16 / 18 / 22 / 28 / 36) */
+  --text-2xs: 12px;
+  --text-xs: 13px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 18px;
+  --text-xl: 22px;
+  --text-2xl: 28px;
+  --text-3xl: 36px;
+  --leading-body: 1.65;
+  --leading-code: 1.55;
+
+  color-scheme: dark;
+}
+
+html {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  margin: 0;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+
+/* every interactive element gets the same visible focus ring (§7.1) */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* hit areas: never smaller than 32×32 (§7.1) */
+button,
+[role='button'],
+a[data-hit='true'],
+summary {
+  min-height: 32px;
+  min-width: 32px;
+}
+
+code,
+kbd,
+pre,
+samp {
+  font-family: var(--font-mono);
+  font-size: var(--code-font-size);
+  line-height: var(--leading-code);
+}
+
+mark {
+  background: var(--accent-soft);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 0 2px;
+}
+
+::selection {
+  background: rgba(62, 207, 142, 0.28);
+  color: var(--text);
+}
+
+* {
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

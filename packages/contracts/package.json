@@ -1,0 +1,21 @@
+{
+  "name": "@repolearn/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenAPI + JSON Schema 契约：前后端与 Kernel 的唯一契约来源",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./types": "./src/types.ts"
+  },
+  "scripts": {
+    "gen": "node scripts/gen.mjs",
+    "build": "node scripts/gen.mjs --check",
+    "typecheck": "tsc --noEmit --strict --target ES2022 --module ESNext --moduleResolution bundler src/index.ts",
+    "test": "node scripts/gen.mjs --check"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.4.4"
+  }
+}

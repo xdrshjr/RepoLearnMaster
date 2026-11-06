@@ -1,0 +1,171 @@
+{
+  "sections": [
+    {
+      "key": "overview",
+      "lessons": [
+        {
+          "anchors": [
+            {
+              "file": "autogen/agentchat/conversable_agent.py",
+              "line_end": 5,
+              "line_start": 1
+            }
+          ],
+          "goal": "看懂分层与入口",
+          "key": "1.1",
+          "minutes": 2,
+          "title": "结构 1"
+        },
+        {
+          "anchors": [
+            {
+              "file": "autogen/agentchat/conversable_agent.py",
+              "line_end": 5,
+              "line_start": 1
+            }
+          ],
+          "goal": "看懂分层与入口",
+          "key": "1.2",
+          "minutes": 2,
+          "title": "结构 2"
+        },
+        {
+          "anchors": [
+            {
+              "file": "autogen/agentchat/conversable_agent.py",
+              "line_end": 5,
+              "line_start": 1
+            }
+          ],
+          "goal": "看懂分层与入口",
+          "key": "1.3",
+          "minutes": 2,
+          "title": "结构 3"
+        }
+      ],
+      "minutes": 6,
+      "title": "第一层 · 宏观架构"
+    },
+    {
+      "key": "walkthrough",
+      "lessons": [
+        {
+          "anchors": [
+            {
+              "file": "autogen/agentchat/groupchat.py",
+              "line_end": 6,
+              "line_start": 1
+            }
+          ],
+          "goal": "画出调用顺序",
+          "key": "2.1",
+          "minutes": 3,
+          "title": "往返 1"
+        },
+        {
+          "anchors": [
+            {
+              "file": "autogen/agentchat/groupchat.py",
+              "line_end": 6,
+              "line_start": 1
+            }
+          ],
+          "goal": "画出调用顺序",
+          "key": "2.2",
+          "minutes": 3,
+          "title": "往返 2"
+        },
+        {
+          "anchors": [
+            {
+              "file": "autogen/agentchat/groupchat.py",
+              "line_end": 6,
+              "line_start": 1
+            }
+          ],
+          "goal": "画出调用顺序",
+          "key": "2.3",
+          "minutes": 3,
+          "title": "往返 3"
+        }
+      ],
+      "minutes": 9,
+      "title": "第二层 · 全局走读"
+    },
+    {
+      "key": "deep_dive",
+      "lessons": [
+        {
+          "anchors": [
+            {
+              "file": "autogen/agentchat/conversable_agent.py",
+              "line_end": 16,
+              "line_start": 10
+            }
+          ],
+          "goal": "解释关键分支",
+          "key": "3.1",
+          "minutes": 3,
+          "title": "精讲 1"
+        },
+        {
+          "anchors": [
+            {
+              "file": "autogen/agentchat/conversable_agent.py",
+              "line_end": 16,
+              "line_start": 10
+            }
+          ],
+          "goal": "解释关键分支",
+          "key": "3.2",
+          "minutes": 3,
+          "title": "精讲 2"
+        },
+        {
+          "anchors": [
+            {
+              "file": "autogen/agentchat/conversable_agent.py",
+              "line_end": 16,
+              "line_start": 10
+            }
+          ],
+          "goal": "解释关键分支",
+          "key": "3.3",
+          "minutes": 3,
+          "title": "精讲 3"
+        },
+        {
+          "anchors": [
+            {
+              "file": "autogen/agentchat/conversable_agent.py",
+              "line_end": 16,
+              "line_start": 10
+            }
+          ],
+          "goal": "解释关键分支",
+          "key": "3.4",
+          "minutes": 3,
+          "title": "精讲 4"
+        }
+      ],
+      "minutes": 12,
+      "title": "第三层 · 深入源码"
+    },
+    {
+      "key": "recap",
+      "lessons": [
+        {
+          "goal": "复述三个结论",
+          "key": "4.1",
+          "minutes": 4,
+          "title": "复盘"
+        }
+      ],
+      "minutes": 4,
+      "title": "课程总结"
+    }
+  ],
+  "subtitle": "夹具生成的黄金样本",
+  "summary_md": "用于契约校验与回归的确定性课程骨架。",
+  "title": "AutoGen 带读课程"
+}

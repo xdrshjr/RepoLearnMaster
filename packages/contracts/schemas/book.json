@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BookChapterBundle",
+  "type": "object",
+  "required": ["chapters"],
+  "properties": {
+    "title": { "type": "string", "maxLength": 200 },
+    "chapters": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["key", "title", "blocks"],
+        "properties": {
+          "key": { "type": "string", "minLength": 1 },
+          "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+          "blocks": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["type"],
+              "properties": {
+                "type": { "enum": ["md", "code", "figure", "table"] },
+                "text": { "type": "string" },
+                "lang": { "type": "string" },
+                "caption": { "type": "string" }
+              }
+            }
+          },
+          "source_refs": { "type": "array", "items": { "type": "object" } }
+        }
+      }
+    }
+  }
+}
