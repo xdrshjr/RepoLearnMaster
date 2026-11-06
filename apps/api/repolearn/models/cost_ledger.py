@@ -6,7 +6,7 @@ from sqlalchemy import Float, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from repolearn.core.db import Base
-from repolearn.models._types import ID, Ref, Ts
+from repolearn.models._types import ID, Ts
 
 
 class CostLedger(Base):

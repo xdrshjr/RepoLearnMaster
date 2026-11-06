@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import hashlib
 
-import pytest
-
 from repolearn.core.clock import utcnow
 from repolearn.core.db import SessionMaker
 from repolearn.core.ids import new_id

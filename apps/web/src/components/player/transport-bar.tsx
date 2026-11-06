@@ -39,7 +39,8 @@ export function SpeedMenu() {
       <select
         value={speed}
         onChange={(event) => setSpeed(Number(event.target.value) as (typeof SPEED_OPTIONS)[number])}
-        className="rounded-[var(--radius-sm)] border border-border bg-code-bg px-1.5 py-1 text-[11px] text-text"
+        data-rl-tap=""
+        className="rounded-[var(--radius-sm)] border border-border bg-code-bg px-1.5 text-[11px] text-text max-lg:h-[var(--tap-target)] lg:py-1"
       >
         {SPEED_OPTIONS.map((option) => (
           <option key={option} value={option}>
@@ -51,6 +52,22 @@ export function SpeedMenu() {
   );
 }
 
+/**
+ * Player transport bar — spec §3.3.1 (断点契约) / §7.3 T-TOUCH-4.
+ *
+ * Layout: `base` is two rows (buttons, then a full-width progress row); `sm` and
+ * up is the familiar single row. The reason is not aesthetics: at 390px the
+ * scrubber squeezed between the buttons shrinks to ~60px for a 6-minute lesson,
+ * which nobody can aim at — it reads as "the progress bar is broken".
+ *
+ * Hit areas: every primary action carries `data-rl-tap` and is ≥44×44 below `lg`.
+ * `lg` restores the original 32px density, because a mouse does not need 44px and
+ * turning every tool button into a 44px block makes the bar a wall (§3.3.1).
+ *
+ * 尺寸必须写成 `h-[var(--tap-target)]` 而不是 `h-11`：`html { font-size: 14px }`，
+ * 于是 Tailwind 的 `0.25rem` 在这里是 3.5px，`h-11` 只有 38.5px —— 一个看起来
+ * 完全正确、实测差 5.5px 的命中区。文案里"44px"的唯一真源是 `--tap-target`。
+ */
 export function TransportBar() {
   const engine = usePlayerEngine();
   const status = usePlayerStore((state) => state.status);
@@ -85,12 +102,20 @@ export function TransportBar() {
   }
 
   return (
-    <div className="border-t border-border bg-bg-elevated">
+    <div
+      className="border-t border-border bg-bg-elevated"
+      // 稳定钩子：a11y / mobile 门禁用它定位"播放器工具条"这块我们自己的子树
+      data-rl-transport=""
+      // 安全区：iPhone 的手势条会压在最后一行按钮上，用 env() 把内容顶上去（§3.3.1）
+      style={{ paddingBottom: 'var(--safe-bottom)' }}
+    >
       <div className="mx-auto flex max-w-[1400px] flex-wrap items-center gap-2 px-3 py-2">
         <div className="flex items-center gap-1">
           <Button
             variant="ghost"
             size="sm"
+            data-rl-tap=""
+            className="max-lg:h-[var(--tap-target)] max-lg:w-[var(--tap-target)]"
             onClick={prevStep}
             aria-label="上一步"
             disabled={stepIndex === 0}
@@ -100,15 +125,18 @@ export function TransportBar() {
           <Button
             variant="primary"
             size="sm"
+            data-rl-tap=""
             onClick={togglePlay}
             aria-label={isPlaying ? '暂停' : '播放'}
-            className="size-9 rounded-full p-0"
+            className="rounded-full p-0 max-lg:h-[var(--tap-target)] max-lg:w-[var(--tap-target)] lg:size-9"
           >
             {isPlaying ? <Pause className="size-4" aria-hidden /> : <Play className="size-4" aria-hidden />}
           </Button>
           <Button
             variant="ghost"
             size="sm"
+            data-rl-tap=""
+            className="max-lg:h-[var(--tap-target)] max-lg:w-[var(--tap-target)]"
             onClick={nextStep}
             aria-label="下一步"
             disabled={stepIndex >= timeline.steps.length - 1}
@@ -117,18 +145,24 @@ export function TransportBar() {
           </Button>
         </div>
 
-        <span className="shrink-0 font-mono text-[11px] text-text-dim">{formatClock(positionMs)}</span>
-        <input
-          type="range"
-          min={0}
-          max={Math.max(1, duration)}
-          step={100}
-          value={Math.min(positionMs, duration)}
-          onChange={(event) => seekStep(Number(event.target.value))}
-          aria-label="当前步骤进度"
-          className="h-1 min-w-[80px] flex-1 accent-[var(--accent)]"
-        />
-        <span className="shrink-0 font-mono text-[11px] text-text-dim">{formatClock(duration)}</span>
+        {/*
+          进度条：base 下 `order-last basis-full` 让它独占第二行；
+          `sm` 起回到单行的中间弹性区。`min-w-0` 是 flex 子项能收缩的前提。
+        */}
+        <div className="order-last flex w-full basis-full items-center gap-2 sm:order-none sm:w-auto sm:basis-auto sm:flex-1">
+          <span className="shrink-0 font-mono text-[11px] text-text-dim">{formatClock(positionMs)}</span>
+          <input
+            type="range"
+            min={0}
+            max={Math.max(1, duration)}
+            step={100}
+            value={Math.min(positionMs, duration)}
+            onChange={(event) => seekStep(Number(event.target.value))}
+            aria-label="当前步骤进度"
+            className="h-1 min-w-0 flex-1 accent-[var(--accent)]"
+          />
+          <span className="shrink-0 font-mono text-[11px] text-text-dim">{formatClock(duration)}</span>
+        </div>
 
         <span className="hidden shrink-0 items-center gap-1 text-[11px] text-text-muted sm:flex">
           <span className="font-mono text-text">
@@ -146,6 +180,8 @@ export function TransportBar() {
           <Button
             variant="ghost"
             size="sm"
+            data-rl-tap=""
+            className="max-lg:h-[var(--tap-target)] max-lg:w-[var(--tap-target)]"
             onClick={toggleCaptions}
             aria-pressed={captionsOn}
             aria-label={captionsOn ? '隐藏字幕' : '显示字幕'}
@@ -166,7 +202,14 @@ export function TransportBar() {
               className="h-1 w-16 accent-[var(--accent)]"
             />
           </label>
-          <Button variant="ghost" size="sm" onClick={() => toggleShortcuts()} aria-label="快捷键说明">
+          <Button
+            variant="ghost"
+            size="sm"
+            data-rl-tap=""
+            className="max-lg:h-[var(--tap-target)] max-lg:w-[var(--tap-target)]"
+            onClick={() => toggleShortcuts()}
+            aria-label="快捷键说明"
+          >
             <Keyboard className="size-4" aria-hidden />
           </Button>
         </div>
@@ -175,7 +218,12 @@ export function TransportBar() {
       {status === 'ended' ? (
         <div className="border-t border-border px-3 py-1.5 text-center text-[11px] text-accent">
           本节已看完 ·{' '}
-          <button type="button" className="underline underline-offset-2" onClick={togglePlay}>
+          <button
+            type="button"
+            data-rl-tap=""
+            className="px-2 underline underline-offset-2 max-lg:min-h-[var(--tap-target)]"
+            onClick={togglePlay}
+          >
             <RotateCcw className="mr-1 inline size-3" aria-hidden />
             重看
           </button>

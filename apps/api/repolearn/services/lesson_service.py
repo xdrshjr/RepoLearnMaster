@@ -7,13 +7,17 @@
 
 from __future__ import annotations
 
+import copy
+from collections.abc import Iterable
 from typing import Any
 
 from sqlalchemy import select
 
+from repolearn.core.clock import utcnow
 from repolearn.core.errors import AppError
+from repolearn.core.ids import new_id
 from repolearn.core.logging import get_logger
-from repolearn.models import Lesson, QuizItem, SimulatedTrace, Step
+from repolearn.models import Lesson, QuizItem, SimulatedTrace, SourceAnchor, Step
 from repolearn.schemas.lesson import LessonBrief, LessonDetail, LessonListResponse, LessonSection
 from repolearn.schemas.playback import (
     AudioRef,
@@ -48,7 +52,7 @@ async def list_lessons(session, course_id: str) -> LessonListResponse:
             select(Lesson).where(Lesson.course_version_id == course_id).order_by(Lesson.order_index)
         )
     ).scalars().all()
-    step_counts = await _step_counts(session, [l.id for l in lessons])
+    step_counts = await _step_counts(session, [lesson.id for lesson in lessons])
     sections: list[LessonSection] = []
     index: dict[str, LessonSection] = {}
     for section in course.sections or []:
@@ -296,3 +300,176 @@ def validate_playback(bundle: dict[str, Any]) -> list[str]:
                 errors.append(f"step {step.get('index')} 在 {cursor}–{seg.get('start_ms')} 之间有空洞")
             cursor = max(cursor, int(seg.get("end_ms", 0) or 0))
     return errors
+
+# --------------------------------------------------------------------------- #
+# 深拷贝（增量升级用，hardening spec §3.5.3）
+# --------------------------------------------------------------------------- #
+
+
+
+async def copy_lessons(session, src_version, dst_version, *, keep_keys: Iterable[str]) -> dict[str, Any]:
+    """把 `src_version` 里**未受影响**的课时深拷贝到 `dst_version`。
+
+    复制什么、不复制什么，每一条都有理由：
+
+    * 复制 `lessons` / `steps` / `simulated_traces` / `quiz_items` / `source_anchors`；
+    * **不复制** `user_progress`：它是"用户学到哪了"，由 `carry_forward` 按公式迁移，
+      直接复制会在同一门课里留下两条互相矛盾的进度行；
+    * **不复制** `quiz_attempts`：答题记录属于用户历史，跨版本合并会污染正确率统计；
+    * **不复制** `notes`：笔记绑定的是课时 id，跨版本合并会让"我当时的笔记"漂移到
+      别的代码行上——这比丢笔记更难解释。
+
+    `source_anchors.commit_sha` 必须写成**源版本的 sha**：这些行号指的是旧 commit
+    里的位置，新镜像里找不到它们。写成新 sha 会让 UI 用新文件去打开旧行号，用户
+    看到的是"锚点指向了错误的代码"，而发布校验也再查不出问题。
+    """
+
+    keep = set(keep_keys)
+    src_lessons = (
+        await session.execute(
+            Lesson.__table__.select().where(Lesson.course_version_id == src_version.id)
+        )
+    ).all()
+    copied = 0
+    skipped = 0
+    key_map: dict[str, str] = {}
+
+    for row in src_lessons:
+        lesson = await session.get(Lesson, row.id)
+        if lesson is None or lesson.key not in keep:
+            skipped += 1
+            continue
+        new_lesson_id = new_id("lesson")
+        key_map[lesson.key] = new_lesson_id
+        session.add(
+            Lesson(
+                id=new_lesson_id,
+                course_version_id=dst_version.id,
+                section_key=lesson.section_key,
+                key=lesson.key,
+                title=lesson.title,
+                goal=lesson.goal,
+                minutes=lesson.minutes,
+                order_index=lesson.order_index,
+                status=lesson.status,
+                playback_meta={
+                    **copy.deepcopy(lesson.playback_meta or {}),
+                    # `copied_from` 是排错与"内容未变"断言的抓手：T-UPG-4 用它
+                    # 证明"这个课时是复制来的，不是重新生成的"。
+                    "copied_from": lesson.id,
+                },
+                created_at=utcnow(),
+            )
+        )
+        await session.flush()
+
+        steps = (
+            await session.execute(Step.__table__.select().where(Step.lesson_id == lesson.id))
+        ).all()
+        for step_row in steps:
+            step = await session.get(Step, step_row.id)
+            if step is None:
+                continue
+            session.add(
+                Step(
+                    id=new_id("step"),
+                    lesson_id=new_lesson_id,
+                    order_index=step.order_index,
+                    title=step.title,
+                    duration_ms=step.duration_ms,
+                    timing_source=step.timing_source,
+                    audio_asset_id=step.audio_asset_id,
+                    focus_file=step.focus_file,
+                    focus_line_start=step.focus_line_start,
+                    focus_line_end=step.focus_line_end,
+                    segments=copy.deepcopy(step.segments or []),
+                    board=copy.deepcopy(step.board or {}),
+                    code_notes=copy.deepcopy(step.code_notes or []),
+                    certainty=copy.deepcopy(step.certainty or {}),
+                    created_at=utcnow(),
+                )
+            )
+
+        traces = (
+            await session.execute(
+                SimulatedTrace.__table__.select().where(SimulatedTrace.lesson_id == lesson.id)
+            )
+        ).all()
+        for trace_row in traces:
+            trace = await session.get(SimulatedTrace, trace_row.id)
+            if trace is None:
+                continue
+            session.add(
+                SimulatedTrace(
+                    id=new_id("trace"),
+                    course_version_id=dst_version.id,
+                    lesson_id=new_lesson_id,
+                    key=trace.key,
+                    title=trace.title,
+                    entry_anchor_id=trace.entry_anchor_id,
+                    steps=copy.deepcopy(trace.steps or []),
+                    certainty_summary=copy.deepcopy(trace.certainty_summary or {}),
+                    created_at=utcnow(),
+                )
+            )
+
+        quizzes = (
+            await session.execute(
+                QuizItem.__table__.select().where(QuizItem.lesson_id == lesson.id)
+            )
+        ).all()
+        for quiz_row in quizzes:
+            quiz = await session.get(QuizItem, quiz_row.id)
+            if quiz is None:
+                continue
+            session.add(
+                QuizItem(
+                    id=new_id("quiz"),
+                    course_version_id=dst_version.id,
+                    lesson_id=new_lesson_id,
+                    stem=quiz.stem,
+                    choices=copy.deepcopy(quiz.choices or []),
+                    answer_id=quiz.answer_id,
+                    explanation_md=quiz.explanation_md,
+                    evidence=copy.deepcopy(quiz.evidence or []),
+                    difficulty=quiz.difficulty,
+                    kind=quiz.kind,
+                    created_at=utcnow(),
+                )
+            )
+
+        anchors = (
+            await session.execute(
+                SourceAnchor.__table__.select().where(SourceAnchor.lesson_id == lesson.id)
+            )
+        ).all()
+        for anchor_row in anchors:
+            anchor = await session.get(SourceAnchor, anchor_row.id)
+            if anchor is None:
+                continue
+            session.add(
+                SourceAnchor(
+                    id=new_id("anchor"),
+                    course_version_id=dst_version.id,
+                    lesson_id=new_lesson_id,
+                    file=anchor.file,
+                    symbol=anchor.symbol,
+                    line_start=anchor.line_start,
+                    line_end=anchor.line_end,
+                    commit_sha=src_version.commit_sha,
+                    kind=anchor.kind,
+                    snippet_hash=anchor.snippet_hash,
+                    created_at=utcnow(),
+                )
+            )
+        copied += 1
+
+    await session.flush()
+    log.info(
+        "lessons_copied",
+        src=src_version.id,
+        dst=dst_version.id,
+        copied=copied,
+        skipped=skipped,
+    )
+    return {"copied": copied, "skipped": skipped, "keys": sorted(key_map)}

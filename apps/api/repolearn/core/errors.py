@@ -8,13 +8,25 @@
 * `retryable` **显式声明**，不从 HTTP 状态推断。推断会得出错误结论：
   `COURSE_NOT_READY` 是 409 但重试只会再拿到 409；`JOB_CONFLICT` 也是 409 但正确
   反应是"跳转到已有 job"而不是重试。前端拿这个布尔值决定"显示重试按钮还是跳转链接"。
-* 19 个错误码是**定稿数量**，新增错误码必须同时加一条测试断言（§8.1）。
+* **20 个错误码是定稿数量**。第 20 个 `VALIDATION_FAILED` 是 hardening spec 的
+  P0-4：全文 4 处引用了它，但它当时**并不存在**，而 `AppError` 对未知码静默降级
+  成 `INTERNAL(500, retryable=True)`——用户把 `offset` 填成 999 会看到"服务内部
+  错误，可重试"并得到一个重试按钮。新增错误码必须同时加一条测试断言（§8.1）。
+* **未知码不再静默降级**：`test` / `dev` / `development` 环境下直接
+  `AssertionError`。理由不是严格癖：让一个确定性的参数错误伪装成可恢复的服务
+  故障，是本产品要消灭的那类静默失效里最难查的一种。生产环境仍然降级为
+  `INTERNAL` 并记 `error_code_unknown` 日志——线上宁可丢语义，也不要丢响应。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+
+#: 未知错误码会被直接断言的环境。
+#: 包含 `development` 是有意的：开发机默认就是它，只在 `test` 里断言的话，
+#: 开发者本机依旧会看到"可重试的 500"，而 500 正是他要去查的那个东西。
+STRICT_CODE_ENVS = frozenset({"test", "dev", "development"})
 
 
 @dataclass(frozen=True)
@@ -59,11 +71,34 @@ ERRORS: dict[str, ErrorSpec] = {
     "PROFILE_CONFLICT": ErrorSpec(
         409, "同时有另一个模型配置正在被激活", "重试即可；系统不会留下两个同时生效的配置", retryable=True
     ),
+    # 第 20 个码（hardening spec P0-4）。`retryable=False` 是关键：重试同一个
+    # 非法 `offset` 只会再拿到同一个 422，给用户一个重试按钮等于骗他。
+    "VALIDATION_FAILED": ErrorSpec(
+        422,
+        "请求参数不合法",
+        "按 hint 里的范围修正参数后重试：fts 模式用 offset（0–200）分页，scan 模式请用 cursor",
+    ),
     "INTERNAL": ErrorSpec(500, "服务内部错误", "把页面上显示的 req_id 提供给维护者，可在 var/logs/api.log 中定位", retryable=True),
 }
 
 # 门禁：错误码数量必须与规范一致，改这里就必须同步改测试（§8.1）
-ERROR_CODE_COUNT = 19
+ERROR_CODE_COUNT = 20
+
+
+def strict_code_env() -> bool:
+    """当前环境是否要求"未知错误码即断言"。
+
+    延迟导入 `settings` 而不是模块级：`errors` 被 `config` 之外的很多模块在
+    很早的阶段导入，而 `settings` 的构造会建目录。测试里 conftest 在导入
+    `repolearn` 之前就把 `REPOLEARN_ENV=test` 设好了，因此这里读到的永远是
+    正确的环境——这也是唯一不受导入顺序影响的做法。
+    """
+    try:
+        from repolearn.core.config import settings
+
+        return str(settings.env).lower() in STRICT_CODE_ENVS
+    except Exception:  # noqa: BLE001 - 配置不可用时不阻断，按宽松处理
+        return False
 
 
 class AppError(Exception):
@@ -79,6 +114,19 @@ class AppError(Exception):
         status: int | None = None,
         details: dict[str, Any] | None = None,
     ) -> None:
+        if code not in ERRORS:
+            if strict_code_env():
+                # 断言而不是 raise AppError("INTERNAL")：后者会让"码表里没有这个码"
+                # 在测试里表现为一个 500，而 500 是测试断言最不敏感的那种失败。
+                raise AssertionError(
+                    f"未知错误码 {code!r}：要么在 ERRORS 里登记它并同步 ERROR_CODE_COUNT，"
+                    f"要么改用已存在的码（当前共 {len(ERRORS)} 个）"
+                )
+            import logging
+
+            logging.getLogger("repolearn.errors").warning(
+                "error_code_unknown", extra={"code": code}
+            )
         spec = ERRORS.get(code, ERRORS["INTERNAL"])
         self.code = code if code in ERRORS else "INTERNAL"
         self.status = status or spec.http

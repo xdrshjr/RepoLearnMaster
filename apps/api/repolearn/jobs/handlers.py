@@ -11,8 +11,6 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from repolearn.core.clock import utcnow
 from repolearn.core.config import settings
 from repolearn.core.db import session_scope
@@ -23,13 +21,13 @@ from repolearn.ingest.mirror import line_count as mirror_line_count
 from repolearn.ingest.mirror import list_files, mirror_path, read_file
 from repolearn.models import CourseVersion
 from repolearn.providers.agent_runtime import refresh_state
-from repolearn.providers.base import AgentBudget, AgentRunRequest, LlmConfig
+from repolearn.providers.base import AgentBudget, AgentRunRequest
 from repolearn.providers.budget_guard import JobBudget, estimate_tokens, usd_for
 from repolearn.providers.registry import build_resolver
 from repolearn.providers.tts.doubao import DoubaoTts, TtsConfigIn
 from repolearn.services import object_store
 from repolearn.services.setup_service import active_profile, profile_llm_configs
-from repolearn.workflow import NODE_LABELS, NODE_PROGRESS, NodeContext, run_graph
+from repolearn.workflow import NODE_LABELS, NODE_PROGRESS, NodeContext
 from repolearn.workflow.publish import publish as publish_course_assets
 
 log = get_logger("handlers")
@@ -384,10 +382,10 @@ async def run_course_job(
         job_id=job_id,
     )
     # NodeContext 是 dataclass，额外挂上节点需要的其余能力（publish / load / tts / 模式）
-    setattr(node_ctx, "load_artifact", ctx.load_artifact)
-    setattr(node_ctx, "publish", ctx.publish)
-    setattr(node_ctx, "synthesize", ctx.synthesize)
-    setattr(node_ctx, "runtime_mode", runtime.mode)
+    node_ctx.load_artifact = ctx.load_artifact
+    node_ctx.publish = ctx.publish
+    node_ctx.synthesize = ctx.synthesize
+    node_ctx.runtime_mode = runtime.mode
 
     # 先把 N1 需要的 repo_url 与 N2 需要的 ref 放进初始 state
     from repolearn.workflow.state import new_state

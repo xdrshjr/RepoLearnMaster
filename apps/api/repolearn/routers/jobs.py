@@ -20,7 +20,6 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Header, Query
 from fastapi.responses import StreamingResponse
 
-from repolearn.core.errors import AppError
 from repolearn.routers.deps import SessionDep, require_csrf, require_internal_token
 from repolearn.schemas.job import (
     JobCancelResponse,
@@ -78,7 +77,7 @@ async def job_events(
             while True:
                 try:
                     env = await asyncio.wait_for(queue.get(), timeout=15.0)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     yield KEEPALIVE_FRAME.encode("utf-8")
                     continue
                 yield sse_frame(env).encode("utf-8")

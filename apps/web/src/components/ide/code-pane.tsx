@@ -1,14 +1,19 @@
 'use client';
 
 import { AlertTriangle, ArrowLeft, PanelLeft, Tag } from 'lucide-react';
+import { useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { Badge, Skeleton } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Breadcrumb, FileTree, FontSizeControls, ReadOnlyBadge } from '@/components/ide/file-tree';
-import { MonacoEditorPane, type MonacoSelection } from '@/components/ide/monaco-editor-pane';
+import {
+  MonacoEditorPane,
+  type MonacoSelection,
+  type SelectionRect,
+} from '@/components/ide/monaco-editor-pane';
 import { PlainCodeView } from '@/components/ide/plain-code-view';
-import { SelectionToolbar } from '@/components/ide/selection-toolbar';
+import { SelectionToolbar, type SelectionAnchor } from '@/components/ide/selection-toolbar';
 import { useCourseFile } from '@/lib/api/hooks';
 import type { CodeNote, EvidenceView, FileRef } from '@/lib/api/types';
 import { buildDecorations, splitLines, type AskActionId } from '@/lib/ide/decorations';
@@ -62,14 +67,27 @@ export function CodePane({
   const [monacoReady, setMonacoReady] = useState(false);
   const [monacoFailed, setMonacoFailed] = useState(false);
   const [treeOpen, setTreeOpen] = useState(false);
-  const [anchor, setAnchor] = useState<{ top: number; left: number } | null>(null);
+  const [anchor, setAnchor] = useState<SelectionAnchor | null>(null);
   const paneRef = useRef<HTMLDivElement | null>(null);
 
   const fileQuery = useCourseFile(courseId, activeFile);
 
+  // 代码视图深链（spec §3.3.3 / §7.3 T-A11Y-1、T-A11Y-4）：
+  //  · `?code=plain`  强制纯文本视图 —— 离线层（Monaco 由 AMD loader 远端拉取，
+  //    见评审 E5：离线时 4.5s 后才回落）必须能把门禁钉在一条路径上；
+  //  · `?code=monaco` 强制编辑器 —— T-A11Y-4 要在"编辑器确实就绪"时跑；
+  //  · 不传则维持既有行为（先挂编辑器，4.5s 没 ready 再回落）。
+  const searchParams = useSearchParams();
+  const codeViewParam = searchParams.get('code');
+  const forcePlainView = codeViewParam === 'plain';
+  const forceMonacoView = codeViewParam === 'monaco';
+
   useEffect(() => {
     setMonacoReady(false);
     setMonacoFailed(false);
+    // 深链钉定视图时不跑超时竞争：否则 `?code=monaco` 会在 4.5s 后自己把编辑器
+    // 拆掉（用户看到的"编辑器闪一下没了"就是这条路）。
+    if (forcePlainView || forceMonacoView) return;
     const timer = window.setTimeout(() => {
       setMonacoReady((ready) => {
         if (!ready) {
@@ -80,7 +98,7 @@ export function CodePane({
       });
     }, MONACO_LOAD_TIMEOUT_MS);
     return () => window.clearTimeout(timer);
-  }, [courseId]);
+  }, [courseId, forcePlainView, forceMonacoView]);
 
   const content = fileQuery.data?.content ?? '';
   const lineCount = useMemo(() => {
@@ -102,8 +120,11 @@ export function CodePane({
 
   const focusLine = focus && focus.file === activeFile ? focus.lineStart : null;
 
+  // 最终渲染哪个视图：深链优先，其次才是"4.5s 没 ready 就回落"（评审 E5）。
+  const showPlainView = forcePlainView || (!forceMonacoView && monacoFailed);
+
   const handleSelect = useCallback(
-    (next: MonacoSelection | null, rect?: DOMRect | null) => {
+    (next: MonacoSelection | null, rect?: SelectionRect | null) => {
       if (!next || !activeFile || next.lineStart <= 0) {
         setSelection(null);
         setAnchor(null);
@@ -116,10 +137,20 @@ export function CodePane({
         text: next.text.slice(0, 4000),
       });
       if (rect) {
-        setAnchor({ top: rect.bottom + 6, left: Math.max(8, rect.left) });
+        // 锚点 = 选区基线（rect.bottom）+ 左边界。偏移与 clamp 都由
+        // `SelectionToolbar` 负责，这样工具条始终贴着选区走。
+        setAnchor({ top: rect.bottom, left: rect.left, source: 'selection' });
       } else {
+        // 降级路径：渲染器给不出真实 rect（Monaco 还没布局完 / 选区被滚出可见区）
+        // 时才用"面板左上角 + 固定偏移"。这是 D29 的**成因**，不是默认路线：
+        // 一旦它成为默认（旧实现里 `rect` 恒为 null），工具条就与选区无关，
+        // 在桌面上也永远贴着面板左上角。
         const paneRect = paneRef.current?.getBoundingClientRect();
-        setAnchor(paneRect ? { top: paneRect.top + 44, left: paneRect.left + 24 } : null);
+        setAnchor(
+          paneRect
+            ? { top: paneRect.top + 44, left: paneRect.left + 24, source: 'fallback' }
+            : null,
+        );
       }
     },
     [activeFile, setSelection],
@@ -160,7 +191,8 @@ export function CodePane({
         <Button
           variant="ghost"
           size="sm"
-          className="px-1.5 md:hidden"
+          data-rl-tap=""
+          className="max-lg:min-h-[44px] max-lg:min-w-[44px] px-1.5 md:hidden"
           aria-label="切换文件列表"
           onClick={() => setTreeOpen((open) => !open)}
         >
@@ -169,7 +201,14 @@ export function CodePane({
         <Breadcrumb parts={breadcrumb} />
         <span className="ml-auto flex items-center gap-1.5">
           {history.length > 0 ? (
-            <Button variant="ghost" size="sm" onClick={goBack} className="px-1.5" aria-label="返回原位置">
+            <Button
+              variant="ghost"
+              size="sm"
+              data-rl-tap=""
+              onClick={goBack}
+              className="max-lg:min-h-[44px] max-lg:min-w-[44px] px-1.5"
+              aria-label="返回原位置"
+            >
               <ArrowLeft className="size-3.5" aria-hidden />
             </Button>
           ) : null}
@@ -189,7 +228,15 @@ export function CodePane({
           className={cn('w-[190px] shrink-0', treeOpen ? 'block' : 'hidden md:block')}
         />
 
-        <div className="relative min-h-0 min-w-0 flex-1">
+        {/* 纯文本视图下 Monaco 不在，容器里就不再有任何可聚焦元素。给它一个 Tab 落点，
+            键盘用户才能"Tab 进代码区"并用方向键滚动（T-A11Y-2 第⑤步）。 */}
+        <div
+          className="relative min-h-0 min-w-0 flex-1"
+          data-code-view={showPlainView ? 'plain' : 'monaco'}
+          tabIndex={showPlainView ? 0 : undefined}
+          role={showPlainView ? 'group' : undefined}
+          aria-label={showPlainView ? '只读代码视图' : undefined}
+        >
           {fileQuery.isLoading ? (
             <div className="space-y-1.5 p-3">
               {Array.from({ length: 12 }).map((_, index) => (
@@ -205,11 +252,17 @@ export function CodePane({
               <p className="mt-1 text-[11px] text-text-muted">
                 {fileQuery.error instanceof Error ? fileQuery.error.message : '未知错误'}
               </p>
-              <Button variant="outline" size="sm" className="mt-2" onClick={() => void fileQuery.refetch()}>
+              <Button
+                variant="outline"
+                size="sm"
+                data-rl-tap=""
+                className="mt-2 max-lg:min-h-[44px]"
+                onClick={() => void fileQuery.refetch()}
+              >
                 重试
               </Button>
             </div>
-          ) : monacoFailed ? (
+          ) : showPlainView ? (
             <PlainCodeView
               content={content}
               decorations={decorations}
@@ -234,7 +287,8 @@ export function CodePane({
                 focusLine={focusLine}
                 onReady={() => setMonacoReady(true)}
                 onNoteClick={handleNoteClick}
-                onSelect={(next) => handleSelect(next, null)}
+                // 真实选区 rect（评审 P1-6）：工具条因此跟着选区走，而不是贴面板左上角
+                onSelect={(next, rect) => handleSelect(next, rect)}
               />
               {monacoReady ? null : (
                 <div className="absolute inset-0 z-10 space-y-1.5 bg-bg p-3">

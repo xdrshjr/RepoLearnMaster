@@ -8,15 +8,15 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 _offset_seconds: float = 0.0
 
 
 def utcnow() -> datetime:
     if _offset_seconds:
-        return datetime.fromtimestamp(time.time() + _offset_seconds, tz=timezone.utc)
-    return datetime.now(timezone.utc)
+        return datetime.fromtimestamp(time.time() + _offset_seconds, tz=UTC)
+    return datetime.now(UTC)
 
 
 def monotonic_ms() -> float:
@@ -28,8 +28,8 @@ def iso(dt: datetime | None) -> str | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def advance(seconds: float) -> None:

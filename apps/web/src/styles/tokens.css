@@ -31,7 +31,12 @@
   /* text */
   --text: #e6edea;
   --text-muted: #9fb0aa;
-  --text-dim: #6d837c;
+  /* `--text-dim` 是 11px/10px 辅助文字的常用色，因此它的上限由**最亮的那层背景**
+     决定：`--surface-2` (#1b2320) 与叠加了 `--accent-soft` 的选中态（合成后
+     ≈ #1f382d）。原值 #6d837c 在这两处分别是 4.23:1 / 3.2:1，低于 AA 的 4.5:1，
+     属于 axe color-contrast（serious）在 T-A11Y-1 里第一批红灯的成因。
+     #8ba49c 实测：on --bg 7.3:1 / on --surface-2 6.0:1 / on accent-soft 4.7:1。 */
+  --text-dim: #8ba49c;
 
   /* status */
   --warn: #e8b44a;
@@ -52,6 +57,17 @@
   --font-ui: Inter, 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace;
   --code-font-size: 13px;
+
+  /* touch (§3.3.1 命中区契约)：触屏视口上的主要动作 ≥ 44×44。
+     用变量而不是散落的 `h-11`，是因为"44 还是 48"是一次产品决策，不是样式细节。 */
+  --tap-target: 44px;
+
+  /* 安全区（刘海屏 / 手势条）。声明成变量，组件侧只写 `env()` 一次；
+     不支持的引擎上 `env()` 的 fallback 0px 会被采用，因此不会破坏布局。 */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
 
   /* derived typography scale (§7.1: 12 / 13 / 14 / 16 / 18 / 22 / 28 / 36) */
   --text-2xs: 12px;
@@ -76,6 +92,8 @@ html {
   line-height: var(--leading-body);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
+  /* 触屏上不闪灰块：点击反馈由 `:focus-visible` 与 hover 态自己表达（§3.3.1） */
+  -webkit-tap-highlight-color: transparent;
 }
 
 body {
@@ -94,13 +112,27 @@ body {
   border-radius: var(--radius-sm);
 }
 
-/* hit areas: never smaller than 32×32 (§7.1) */
-button,
-[role='button'],
-a[data-hit='true'],
-summary {
-  min-height: 32px;
-  min-width: 32px;
+/* hit areas: never smaller than 32×32 (§7.1)。
+   **必须在 base 层里**：无层级的声明优先级高于 Tailwind 的 `@layer utilities`，
+   会把组件上的 `min-h-11`（触屏 44px，§3.3.1）压回 32px，而这类失败只会
+   在真实设备上被看见。放进 base 后，"默认 32px、触屏临时调大"才是可组合的。 */
+@layer base {
+  button,
+  [role='button'],
+  a[data-hit='true'],
+  summary {
+    min-height: 32px;
+    min-width: 32px;
+  }
+}
+
+@layer utilities {
+  /* 窄屏上代码块 / 表格横向滚动：iOS 老版本需要 `-webkit-overflow-scrolling`
+     才有惯性滚动，只写 `overflow-x: auto` 会出现"能滑但滑不动"的手感（§3.3.2 D31）。 */
+  .rl-scroll-x {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
 }
 
 code,

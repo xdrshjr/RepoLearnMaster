@@ -1,11 +1,11 @@
 'use client';
 
 import Link from 'next/link';
-import { Clock, GitBranch, Play, Star } from 'lucide-react';
+import { Clock, GitBranch, Play, SearchX, Star } from 'lucide-react';
 
 import { Badge, EmptyState, SectionTitle, Skeleton } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { useCourses } from '@/lib/api/hooks';
+import { useCourses, type CourseSearchResponse, type HighlightGroup, type HighlightSegment } from '@/lib/api/hooks';
 import type { CourseListItem } from '@/lib/api/types';
 import { formatCount, formatMinutes, formatRelativeTime } from '@/lib/format';
 import { courseRoute } from '@/lib/repo/parseRepoUrl';
@@ -35,7 +35,47 @@ const STATUS_LABEL: Record<string, string> = {
   stale: '待重建',
 };
 
-export function CourseCard({ course }: { course: CourseListItem }) {
+/**
+ * 高亮片段渲染（spec §3.4.4）。
+ *
+ * 服务端只回 `{text, marked}` 切段、**从不回 HTML**，所以这里用 React 元素逐个
+ * 渲染；`<mark>` 由 React 生成，全仓因此不需要（也不允许）为搜索引入
+ * `dangerouslySetInnerHTML`——`title`/`summary` 来自 LLM，注入面是真实存在的。
+ */
+export function HighlightedText({
+  segments,
+  fallback,
+}: {
+  segments?: HighlightSegment[] | null;
+  fallback: React.ReactNode;
+}) {
+  if (!segments || segments.length === 0) return <>{fallback}</>;
+  return (
+    <>
+      {segments.map((segment, index) =>
+        segment.marked ? (
+          <mark
+            key={`${index}-${segment.text}`}
+            className="rounded-[2px] bg-accent-soft px-0.5 text-accent"
+          >
+            {segment.text}
+          </mark>
+        ) : (
+          segment.text
+        ),
+      )}
+    </>
+  );
+}
+
+export function CourseCard({
+  course,
+  highlights,
+}: {
+  course: CourseListItem;
+  /** 搜索命中时才给：未搜索时服务端返回 null，卡片与原来逐字节一致 (§3.4.4)。 */
+  highlights?: HighlightGroup | null;
+}) {
   const palette = PALETTES[course.cover_palette] ?? PALETTES.mint;
   return (
     <article className="group relative overflow-hidden rounded-[var(--radius)] border border-border bg-surface transition-colors hover:border-border-strong">
@@ -43,9 +83,14 @@ export function CourseCard({ course }: { course: CourseListItem }) {
       <div className="p-4">
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0">
-            <h3 className="truncate text-sm font-semibold text-text">{course.repo.full_name}</h3>
+            <h3 className="truncate text-sm font-semibold text-text">
+              <HighlightedText segments={highlights?.repo} fallback={course.repo.full_name} />
+            </h3>
             <p className="mt-1 line-clamp-2 min-h-8 text-xs leading-[1.6] text-text-muted">
-              {course.title || course.repo.description || '课程已生成，进入第一层查看宏观架构。'}
+              <HighlightedText
+                segments={highlights?.title ?? highlights?.summary}
+                fallback={course.title || course.repo.description || '课程已生成，进入第一层查看宏观架构。'}
+              />
             </p>
           </div>
           <Badge tone={statusTone(course.status)}>{STATUS_LABEL[course.status] ?? course.status}</Badge>
@@ -165,5 +210,107 @@ export function RecentLearning() {
         ))}
       </ul>
     </section>
+  );
+}
+
+/* --------------------------------------------------------- search result slab */
+
+/**
+ * 搜索结果区（spec §4.3 #51「接搜索态」）。
+ *
+ * 三种状态各自有明确文案，因为它们对用户意味着不同的事：
+ *  · 空结果 → "没有找到匹配的课程"（而不是留一片空白让人以为界面坏了）；
+ *  · 回退   → "这次是按创建时间列出的"（**列表仍然有内容**，这是 §3.4.3 第 3 条
+ *             要防的静默空结果：2 字查询在 trigram 下返回 0 行且不报错）；
+ *  · 失败   → 可执行的重试。
+ *
+ * `role="status"` 放在这块区域上：计数行变化即播报，`aria-atomic="false"` 保证
+ * 屏幕阅读器只读变化的摘要行，而不是把整页结果重念一遍。
+ */
+export function SearchResults({
+  query,
+  data,
+  isLoading,
+  isPlaceholderData = false,
+  isError,
+  errorMessage,
+  onRetry,
+}: {
+  query: string;
+  data?: CourseSearchResponse;
+  isLoading: boolean;
+  isPlaceholderData?: boolean;
+  isError: boolean;
+  errorMessage?: string | null;
+  onRetry: () => void;
+}) {
+  const items = data?.items ?? [];
+  const total = typeof data?.total === 'number' ? data.total : items.length;
+  const shortQuery = data?.fallback_reason === 'query_too_short';
+  const summary = isError
+    ? '搜索失败'
+    : isLoading && items.length === 0
+      ? '正在搜索…'
+      : `找到 ${total} 门课`;
+
+  if (isError) {
+    return (
+      <div role="status" aria-live="polite" aria-atomic="false" data-rl-search-results="" className="mt-4">
+        <EmptyState
+          title="搜索失败"
+          description={errorMessage || '服务暂时不可用，稍后再试。'}
+          action={
+            <Button variant="outline" size="sm" onClick={onRetry}>
+              重试
+            </Button>
+          }
+        />
+      </div>
+    );
+  }
+
+  if (isLoading && items.length === 0) {
+    return (
+      <div role="status" aria-live="polite" aria-atomic="false" data-rl-search-results="" className="mt-4">
+        <p className="mb-2 text-[11px] text-text-dim">{summary}</p>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, index) => (
+            <Skeleton key={index} className="h-40" />
+          ))}
+        </div>
+      </div>
+    );
+  }
+
+  if (items.length === 0) {
+    return (
+      <div role="status" aria-live="polite" aria-atomic="false" data-rl-search-results="" className="mt-4">
+        <EmptyState
+          icon={<SearchX className="size-5" aria-hidden />}
+          title={`没有找到匹配「${query}」的课程`}
+          description="换一个更短的关键词（≥3 字才走全文索引），或者直接搜仓库名，例如 facebook/react。"
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div role="status" aria-live="polite" aria-atomic="false" data-rl-search-results="" className="mt-4">
+      <p className="mb-2 flex flex-wrap items-center gap-2 text-[11px] text-text-dim">
+        <span>{summary}</span>
+        {shortQuery ? (
+          <span className="text-warn">「{query}」短于 3 字：这次是按创建时间列出的，并不代表没有匹配。</span>
+        ) : null}
+        {isPlaceholderData && isLoading ? <span className="text-text-dim">更新中…</span> : null}
+        {typeof data?.next_offset === 'number' ? (
+          <span className="text-text-dim">全文索引分页至第 {data.next_offset} 条（上限 200）</span>
+        ) : null}
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {items.map((course) => (
+          <CourseCard key={course.id} course={course} highlights={course.highlights} />
+        ))}
+      </div>
+    </div>
   );
 }

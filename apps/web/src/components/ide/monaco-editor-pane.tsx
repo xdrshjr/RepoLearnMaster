@@ -32,15 +32,79 @@ export interface MonacoSelection {
   text: string;
 }
 
+/**
+ * 选区在**视口坐标**下的矩形（与 `DOMRect` 结构兼容，因此 `PlainCodeView`
+ * 里 `range.getBoundingClientRect()` 的结果可以直接传过来）。
+ */
+export interface SelectionRect {
+  top: number;
+  left: number;
+  bottom: number;
+  right: number;
+  width: number;
+  height: number;
+}
+
 export interface MonacoPaneProps {
   content: string;
   lang: string;
   decorations: LineDecoration[];
   fontSize: number;
   focusLine: number | null;
-  onSelect: (selection: MonacoSelection | null) => void;
+  /** `rect` 是选区在视口里的真实位置；算不出来时回传 `null`（上层用兜底偏移）。 */
+  onSelect: (selection: MonacoSelection | null, rect: SelectionRect | null) => void;
   onNoteClick: (line: number) => void;
   onReady: () => void;
+}
+
+/**
+ * 把 Monaco 的"滚动后可见位置"换算成视口坐标（评审 P1-6 / 实证 E11）。
+ *
+ * 旧实现只回传行号，于是工具条锚点只能猜（面板左上角 + 固定偏移），在桌面上
+ * 也永远贴着面板左上角——用户会以为工具条坏了。这里用
+ * `editor.getScrolledVisiblePosition()`（相对编辑区左上角）+ 编辑区
+ * `getBoundingClientRect()`（相对视口）相加，得到与 `position: fixed` 一致的
+ * 坐标系；任何一步拿不到（选区已被滚出可见区、编辑器还没布局完）就返回 `null`，
+ * 让上层退化而不是让页面崩。
+ */
+function toViewportRect(editor: any, selection: any): SelectionRect | null {
+  try {
+    const domNode = editor.getDomNode?.() as HTMLElement | null;
+    const domRect = domNode?.getBoundingClientRect?.();
+    if (!domRect) return null;
+
+    const start = editor.getScrolledVisiblePosition?.({
+      lineNumber: selection.startLineNumber,
+      column: selection.startColumn,
+    });
+    if (!start || typeof start.top !== 'number' || typeof start.left !== 'number') return null;
+
+    const lineHeight = typeof start.height === 'number' && start.height > 0 ? start.height : 18;
+    const lineSpan = Math.max(1, selection.endLineNumber - selection.startLineNumber + 1);
+    const end = editor.getScrolledVisiblePosition?.({
+      lineNumber: selection.endLineNumber,
+      column: selection.endColumn,
+    });
+
+    const top = domRect.top + start.top;
+    const left = domRect.left + start.left;
+    const bottom =
+      end && typeof end.top === 'number' ? domRect.top + end.top + lineHeight : top + lineHeight * lineSpan;
+    const right = end && typeof end.left === 'number' ? domRect.left + end.left : left;
+
+    return {
+      top,
+      left,
+      bottom: Math.max(bottom, top + 1),
+      right: Math.max(right, left),
+      width: Math.max(0, right - left),
+      height: Math.max(1, bottom - top),
+    };
+  } catch {
+    // 第三方编辑器在卸载/重建期间会抛（`getModel()` 已销毁等），这里不兜底就会
+    // 让整个代码面板白屏——工具条少一次精确定位远好过硬崩。
+    return null;
+  }
 }
 
 function toMonacoDecorations(monaco: any, decorations: LineDecoration[]) {
@@ -156,19 +220,23 @@ export function MonacoEditorPane({
           const model = editor.getModel();
           const selection = editor.getSelection();
           if (!model || !selection) {
-            onSelect(null);
+            onSelect(null, null);
             return;
           }
           const text = model.getValueInRange(selection);
           if (!text || text.trim().length === 0) {
-            onSelect(null);
+            onSelect(null, null);
             return;
           }
-          onSelect({
-            lineStart: selection.startLineNumber,
-            lineEnd: selection.endLineNumber,
-            text,
-          });
+          onSelect(
+            {
+              lineStart: selection.startLineNumber,
+              lineEnd: selection.endLineNumber,
+              text,
+            },
+            // 真实选区 rect（视口坐标）——工具条"跟着选区走"的唯一来源
+            toViewportRect(editor, selection),
+          );
         });
 
         editor.onMouseDown((event: any) => {

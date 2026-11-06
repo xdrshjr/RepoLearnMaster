@@ -243,3 +243,137 @@ async def _call_chain(session, course_id: str) -> dict[str, Any]:
             if isinstance(s, dict)
         ],
     }
+
+
+# --------------------------------------------------------------------------- #
+# 进度迁移（增量升级用，hardening spec §3.5.3）
+# --------------------------------------------------------------------------- #
+
+
+def carry_forward_percent(*, old_percent: int, kept: int, old_lessons: int, new_lessons: int) -> int:
+    """把旧版本的完成度换算到新版本（**确定性公式，不是"等比下调"四个字**）。
+
+    不变式（两条都要能被断言，见 `tests/test_upgrade_pipeline.py::T-UPG-6`）：
+
+    1. **只降不升**：`percent_new <= old_percent`。否则用户什么都没做，完成度
+       却从 40% 跳回 90%——这类"凭空长出来的进度"会直接毁掉用户对进度的信任。
+    2. **不超过按新课时数重算的上限**：`percent_new <= floor(100 * kept / new_lessons)`。
+       否则新版本课时变多时，用户会看到"已学完 8/12"却只点开过 3 个课时。
+
+    公式：
+        lesson_ratio = kept / old_lessons          # 学过的内容里有多少还在
+        percent_new  = floor(old_percent * lesson_ratio)
+        percent_new  = min(percent_new, floor(100 * kept / new_lessons))
+        percent_new  = max(0, percent_new)
+    """
+    if old_lessons <= 0 or new_lessons <= 0:
+        return 0
+    kept_clamped = max(0, min(kept, old_lessons, new_lessons))
+    lesson_ratio = kept_clamped / old_lessons
+    percent_new = int(old_percent * lesson_ratio)  # int() 在地板上对正数即 floor
+    cap = int(100 * kept_clamped / new_lessons)
+    percent_new = min(percent_new, cap)
+    return max(0, percent_new)
+
+
+async def carry_forward(session, old_version, new_version) -> dict[str, Any]:
+    """把本地用户的进度从旧版本迁到新版本。
+
+    三种情况，顺序有意义：
+
+    * 新版本**已有**进度行 → 用户可能已经在新版本里学了一会儿，**以新版本为准**，
+      只补空字段（`current_lesson_key` 为空才写）。反过来的话，用户刚在新版里
+      点开第 5 节，一次后台迁移就把他送回第 2 节。
+    * `current_lesson_key` 在新版本里仍存在 → 原样保留它、`current_step_index`
+      与 `position_ms`（用户停在哪一步、音频拖到哪一秒），只按公式下调 `percent`。
+    * 该 key 被删除 → 沿**旧版本的 order_index 往前找**最近一个仍存在的 key；
+      `current_step_index = 0`、`position_ms = 0`（旧的位置在新的课时里没有意义）。
+    """
+    user = await ensure_local_user(session)
+    old_row = (
+        await session.execute(
+            select(UserProgress).where(
+                UserProgress.user_id == user.id, UserProgress.course_version_id == old_version.id
+            )
+        )
+    ).scalar_one_or_none()
+    if old_row is None:
+        return {"migrated": False, "reason": "no_progress"}
+
+    old_lessons = (
+        await session.execute(
+            select(Lesson).where(Lesson.course_version_id == old_version.id).order_by(Lesson.order_index)
+        )
+    ).scalars().all()
+    new_lessons = (
+        await session.execute(
+            select(Lesson).where(Lesson.course_version_id == new_version.id).order_by(Lesson.order_index)
+        )
+    ).scalars().all()
+    new_keys = {lesson.key for lesson in new_lessons}
+    kept = sum(1 for lesson in old_lessons if lesson.key in new_keys)
+
+    existing = (
+        await session.execute(
+            select(UserProgress).where(
+                UserProgress.user_id == user.id, UserProgress.course_version_id == new_version.id
+            )
+        )
+    ).scalar_one_or_none()
+
+    target_key = old_row.current_lesson_key if old_row.current_lesson_key in new_keys else None
+    step_index = old_row.current_step_index if target_key else 0
+    position_ms = old_row.position_ms if target_key else 0
+    if target_key is None:
+        # 往前找最近一个仍然存在的课时（按旧版本的顺序，不是字典序）。
+        for lesson in sorted(old_lessons, key=lambda row: row.order_index, reverse=True):
+            if lesson.key in new_keys:
+                target_key = lesson.key
+                break
+
+    percent = carry_forward_percent(
+        old_percent=old_row.percent,
+        kept=kept,
+        old_lessons=len(old_lessons),
+        new_lessons=len(new_lessons),
+    )
+    completed_at = old_row.completed_at if percent >= 100 else None
+
+    if existing is not None:
+        # 新版本已有的记录优先：只补空字段，不覆盖用户在新版本里的实际行为。
+        if not existing.current_lesson_key and target_key:
+            existing.current_lesson_key = target_key
+            existing.current_step_index = step_index
+            existing.position_ms = position_ms
+        existing.percent = max(existing.percent, percent)
+        if existing.completed_at is None:
+            existing.completed_at = completed_at
+        existing.updated_at = utcnow()
+        await session.flush()
+        return {"migrated": True, "mode": "merged", "percent": existing.percent, "kept": kept}
+
+    session.add(
+        UserProgress(
+            id=new_id("event"),
+            user_id=user.id,
+            course_version_id=new_version.id,
+            current_lesson_key=target_key,
+            current_step_index=step_index,
+            position_ms=position_ms,
+            percent=percent,
+            completed_at=completed_at,
+            created_at=utcnow(),
+            updated_at=utcnow(),
+        )
+    )
+    await session.flush()
+    log.info(
+        "progress_carried_forward",
+        from_course=old_version.id,
+        to_course=new_version.id,
+        percent=percent,
+        kept=kept,
+        old_lessons=len(old_lessons),
+        new_lessons=len(new_lessons),
+    )
+    return {"migrated": True, "mode": "created", "percent": percent, "kept": kept}

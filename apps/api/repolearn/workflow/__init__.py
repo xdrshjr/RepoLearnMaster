@@ -17,9 +17,9 @@ from repolearn.workflow.course_graph import (
 )
 from repolearn.workflow.state import (
     MAX_CHECKPOINT_BYTES,
-    NODES,
     NODE_LABELS,
     NODE_PROGRESS,
+    NODES,
     CourseGenState,
     merge_budget,
     merge_dict,

@@ -17,7 +17,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from repolearn.analysis import analyze
 from repolearn.core.errors import AppError
@@ -25,7 +26,7 @@ from repolearn.core.logging import get_logger
 from repolearn.ingest import fetch_and_mirror, mirror_stat
 from repolearn.ingest.mirror import line_count as mirror_line_count
 from repolearn.ingest.mirror import list_files, read_file
-from repolearn.workflow.parsing import check_curriculum, check_segments, check_quiz
+from repolearn.workflow.parsing import check_curriculum, check_quiz, check_segments
 from repolearn.workflow.prompts import (
     critic_prompt,
     critic_system,
@@ -83,7 +84,8 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
     # ---- N2 ---------------------------------------------------------------
     async def resolve_commit(state: dict) -> dict:
         await _emit("resolve_commit")
-        from repolearn.ingest.github import parse_repo_url, resolve_commit as gh_resolve
+        from repolearn.ingest.github import parse_repo_url
+        from repolearn.ingest.github import resolve_commit as gh_resolve
 
         repo = state.get("repo") or {}
         ref = parse_repo_url(repo.get("full_name", ""))
@@ -407,7 +409,6 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
     # ---- N9 ---------------------------------------------------------------
     async def publish_course(state: dict) -> dict:
         await _emit("publish_course", 100)
-        from repolearn.workflow.publish import publish
 
         result = await ctx.publish(state)
         return result

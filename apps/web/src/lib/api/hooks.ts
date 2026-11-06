@@ -8,6 +8,7 @@
  */
 
 import {
+  keepPreviousData,
   useMutation,
   useQuery,
   useQueryClient,
@@ -22,6 +23,7 @@ import type {
   BookDetail,
   CourseCreatedResponse,
   CourseDetail,
+  CourseListItem,
   CourseListResponse,
   DoctorResponse,
   FileContentResponse,
@@ -76,6 +78,74 @@ export function useCourses(
     queryKey: qk.courses(params),
     queryFn: () => api.get<CourseListResponse>('/api/courses', { query: params }),
     staleTime: 60_000,
+    ...options,
+  });
+}
+
+/* ------------------------------------------------------- search (spec §3.4.4) */
+
+/**
+ * 搜索契约的**前端增量部分**。
+ *
+ * `types.ts` 是手工镜像的 wire 类型，本轮不在我的改动范围内（`schema.d.ts` 由
+ * 契约生成、已含这些字段），所以新增的 `mode` / `fallback_reason` / `highlights`
+ * 在这里以**扩展**而非重写的方式声明：`CourseListItem` 一个字段都不改，只是多
+ * 了一个可选的高亮组，因此老调用点（首页热门课程、最近学习）完全不受影响。
+ */
+export type HighlightSegment =
+  /** 服务端做的是**安全切段**，不返回 HTML——这正是前端不需要 dangerouslySetInnerHTML 的原因。 */
+  { text: string; marked: boolean };
+
+export interface HighlightGroup {
+  title?: HighlightSegment[] | null;
+  summary?: HighlightSegment[] | null;
+  repo?: HighlightSegment[] | null;
+}
+
+/** 实际生效的检索模式，**不是**配置值（`auto` 只出现在请求侧）。 */
+export type SearchMode = 'none' | 'scan' | 'fts' | string;
+export type SearchFallbackReason = 'query_too_short' | 'sqlite_too_old' | string | null;
+
+/** `GET /api/courses` 的请求侧模式（`search-parity.spec.ts` 的对照实验也用它）。 */
+export type CourseSearchMode = 'auto' | 'scan' | 'fts';
+
+export interface SearchCourseItem extends CourseListItem {
+  highlights?: HighlightGroup | null;
+}
+
+export interface CourseSearchResponse {
+  items: SearchCourseItem[];
+  /** `none | scan | fts` —— 回退时如实回显，UI 据此显示"为什么不是全文索引"。 */
+  mode: SearchMode;
+  fallback_reason?: SearchFallbackReason;
+  next_cursor?: string | null;
+  /** 只有 fts 模式给（offset 分页，上限 200，见 §3.4.3 第 3 条取舍）。 */
+  next_offset?: number | null;
+  total?: number | null;
+}
+
+/**
+ * 课程搜索 —— `staleTime: 0` + `placeholderData: keepPreviousData`（评审 P1-1）。
+ *
+ * `keepPreviousData` 在 TanStack Query **v5** 里是一个**函数**，必须从包里 import
+ * 后传给 `placeholderData`；v4 的 `keepPreviousData: true` 选项在 v5 已移除。
+ * 写错的后果是"每次按键列表闪成空态"（或 TS 直接报错），两种都不是我们要的。
+ */
+export function useCourseSearch(
+  q: string,
+  mode: CourseSearchMode = 'auto',
+  options: Partial<UseQueryOptions<CourseSearchResponse>> = {},
+) {
+  const term = q.trim();
+  return useQuery<CourseSearchResponse>({
+    queryKey: qk.courses({ q: term, mode, limit: 20 }),
+    queryFn: () =>
+      api.get<CourseSearchResponse>('/api/courses', { query: { q: term, mode, limit: 20 } }),
+    // 与既有 hooks 同一形态：没有关键词就不发请求（空查询在后端是"全量列表"，
+    // 而首页的"热门课程"已经承担了那件事）。
+    enabled: term.length > 0,
+    staleTime: 0,
+    placeholderData: keepPreviousData,
     ...options,
   });
 }
@@ -181,6 +251,111 @@ export function useCreateCourse() {
       ),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['courses'] });
+    },
+  });
+}
+
+/* ---------------------------------------------- upgrade (spec §3.5.2 / §3.5.4) */
+
+/**
+ * `POST /v1/courses/{id}/upgrade` 的两种成功形态（spec §5.1.2）：
+ *
+ * * **200 + 计划**：`dry_run=True`，或 `mode in {none, reused}`。纯读，不写库。
+ * * **202 + job**：真的开始生成新版本，旧版本**全程保持可读**（与 `/rebuild` 的
+ *   关键区别，§3.5.4）。
+ *
+ * 判别用 `job_id` 是否存在——两条分支的 200 体都带 `course_id`，只有 202 带 `job_id`。
+ */
+export type UpgradeDecisionMode = 'none' | 'partial' | 'full' | 'reused' | string;
+
+export interface UpgradeAffectedLesson {
+  key: string;
+  title: string;
+}
+
+export interface UpgradePlan {
+  mode: UpgradeDecisionMode;
+  /** 机器可读 + 人类可读，直接进 UI（阈值、受影响文件数都在这里）。 */
+  reasons: string[];
+  stats: Record<string, number>;
+  affected_lessons: UpgradeAffectedLesson[];
+  course_id: string;
+  from_sha: string;
+  to_sha: string;
+}
+
+export interface UpgradeStarted {
+  job_id: string;
+  course_id: string;
+  mode: string;
+}
+
+export type UpgradeOutcome =
+  | { kind: 'plan'; plan: UpgradePlan }
+  | { kind: 'started'; started: UpgradeStarted };
+
+type UpgradeWireResponse = Partial<UpgradePlan> & Partial<UpgradeStarted>;
+
+function readUpgradeOutcome(data: UpgradeWireResponse): UpgradeOutcome {
+  if (typeof data.job_id === 'string' && data.job_id.length > 0) {
+    return {
+      kind: 'started',
+      started: {
+        job_id: data.job_id,
+        course_id: data.course_id ?? '',
+        mode: data.mode ?? 'partial',
+      },
+    };
+  }
+  return {
+    kind: 'plan',
+    plan: {
+      mode: data.mode ?? 'none',
+      reasons: data.reasons ?? [],
+      stats: data.stats ?? {},
+      affected_lessons: data.affected_lessons ?? [],
+      course_id: data.course_id ?? '',
+      from_sha: data.from_sha ?? '',
+      to_sha: data.to_sha ?? '',
+    },
+  };
+}
+
+/**
+ * 检查更新 / 生成新版本。
+ *
+ * 幂等：`dry_run` 不写库也不带 `Idempotency-Key`（重复点击有服务端的计划缓存兜底）；
+ * 真正开始的那一次**带**幂等键，否则连点两下就会建出两个新版本。
+ *
+ * 超时 30s 而不是默认 15s：后端同步路径的上限是 20s，超过它会自己切 202
+ * （§3.5.2 的 P1-10 第 ③ 条），客户端只是给它留出把 202 说完的余量。
+ */
+export function useUpgrade(courseId: string | null | undefined) {
+  const queryClient = useQueryClient();
+  return useMutation<UpgradeOutcome, Error, { dryRun: boolean; ref?: string | null }>({
+    mutationFn: async ({ dryRun, ref }) => {
+      const data = await api.post<UpgradeWireResponse>(
+        `/api/courses/${encodeURIComponent(courseId!)}/upgrade`,
+        { dry_run: dryRun, ref: ref ?? undefined },
+        {
+          timeoutMs: 30_000,
+          retries: 0,
+          idempotencyKey: dryRun ? undefined : newIdempotencyKey(),
+        },
+      );
+      return readUpgradeOutcome(data ?? {});
+    },
+    onSuccess: (outcome) => {
+      // 新版本一定改变课程列表；旧版本的详情也要重取（`upgraded_from` 关系、
+      // 以及"新版本已开始生成"的状态位）。
+      void queryClient.invalidateQueries({ queryKey: ['courses'] });
+      if (courseId) void queryClient.invalidateQueries({ queryKey: qk.course(courseId) });
+      if (outcome.kind === 'started') {
+        void queryClient.invalidateQueries({ queryKey: ['jobs'] });
+        if (outcome.started.course_id) {
+          void queryClient.invalidateQueries({ queryKey: qk.course(outcome.started.course_id) });
+        }
+      }
     },
   });
 }

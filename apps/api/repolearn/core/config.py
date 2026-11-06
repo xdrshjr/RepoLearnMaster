@@ -14,7 +14,7 @@ import secrets
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -59,6 +59,18 @@ class Settings(BaseSettings):
 
     github_token: str = ""
     max_repo_mb: int = 60
+    # GitHub 接入点（hardening spec §3.2.1）。默认值就是官方站点，因此既有行为
+    # 在"什么都不配"时逐字节不变；改成自建 GHE / 本地假端点时才生效。
+    # **只允许来自服务端环境变量**：任何请求体/查询参数都不得覆盖它，否则
+    # `POST /v1/courses {api_base: "http://169.254.169.254"}` 就是一个 SSRF 洞。
+    github_api_base: str = "https://api.github.com"
+    github_web_base: str = "https://github.com"
+
+    # 运行时状态目录（hardening spec P1-5）。环境变量就是 `REPOLEARN_RUN_DIR`。
+    # `preflight.json` / `ports.json` / pid 文件全是**跟运行实例走**的事实；写死在
+    # `REPO_ROOT/.run` 会让 e2e-real 读到开发机上一次运行的旧结论，然后用旧事实
+    # 解释新行为。字段本身是字符串（与环境变量同形），Path 由 `run_path` 派生。
+    run_dir: str = ""
 
     kernel_url: str = "http://127.0.0.1:8787"
     agent_runtime: str = "auto"
@@ -106,6 +118,24 @@ class Settings(BaseSettings):
             raise ValueError("REPOLEARN_SEARCH must be 'scan' or 'fts'")
         return v
 
+    @field_validator("github_api_base", "github_web_base")
+    @classmethod
+    def _check_http_url(cls, v: str) -> str:
+        """两个 base 必须是 http(s) URL 且不带尾部斜杠。
+
+        校验放在配置层而不是使用处：一个拼错的端点只会在"第一次点生成"时暴露，
+        而那时代价是用户等了 30 秒才看到一个 503。启动时就炸，比运行时炸好。
+        """
+        v = (v or "").strip().rstrip("/")
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("REPOLEARN_GITHUB_API_BASE / REPOLEARN_GITHUB_WEB_BASE 必须是 http(s) URL")
+        return v
+
+    @field_validator("run_dir")
+    @classmethod
+    def _check_relaxed_path(cls, v: str) -> str:
+        return (v or "").strip()
+
     # ---- 派生路径 ---------------------------------------------------------
     @property
     def repo_root(self) -> Path:
@@ -125,8 +155,42 @@ class Settings(BaseSettings):
         return self.var_dir / "logs"
 
     @property
-    def run_dir(self) -> Path:
-        return REPO_ROOT / ".run"
+    def run_path(self) -> Path:
+        """运行时状态目录的**物理路径**。默认 `REPO_ROOT/.run`，可由 `REPOLEARN_RUN_DIR` 覆盖。
+
+        覆盖是**修正**而不是新增能力：里面的 `preflight.json` / `ports.json` /
+        pid 文件本来就是运行时状态，固定路径会让并行跑的两份工作区互相覆盖，
+        也会让 e2e-real 把开发机的旧 Gate 0 结论当成这一轮的结论。
+        """
+        raw = (self.run_dir or "").strip()
+        if not raw:
+            return REPO_ROOT / ".run"
+        p = Path(raw)
+        return p if p.is_absolute() else (REPO_ROOT / p)
+
+    @property
+    def github_api(self) -> str:
+        return self.github_api_base.rstrip("/")
+
+    @property
+    def github_web(self) -> str:
+        return self.github_web_base.rstrip("/")
+
+    @property
+    def github_allowed_hosts(self) -> frozenset[str]:
+        """允许出现在出站流量里的 host 集合（含官方站点）。
+
+        官方站点永远在白名单里：既有用例都用 `https://github.com/...`，把它们
+        一起禁掉会让"配了自建端点"变成"官方仓库不能导入了"。
+        """
+        from urllib.parse import urlparse
+
+        hosts = {"github.com", "www.github.com", "api.github.com", "codeload.github.com"}
+        for raw in (self.github_web, self.github_api):
+            netloc = urlparse(raw).netloc.lower()
+            if netloc:
+                hosts.add(netloc)
+        return frozenset(hosts)
 
     @property
     def sqlite_path(self) -> Path | None:
@@ -167,7 +231,7 @@ class Settings(BaseSettings):
             self.object_path / "diagrams",
             self.object_path / "artifacts",
             self.log_dir,
-            self.run_dir,
+            self.run_path,
             REPO_ROOT / "var" / "uploads",
         ):
             d.mkdir(parents=True, exist_ok=True)

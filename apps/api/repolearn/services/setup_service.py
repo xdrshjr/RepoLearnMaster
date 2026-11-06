@@ -25,6 +25,9 @@ from repolearn.providers.agent_runtime import refresh_state
 from repolearn.providers.base import LlmConfig
 from repolearn.providers.registry import ROLES, adapter_for
 from repolearn.schemas.setup import (
+    ActiveProfile,
+    Gates,
+    KernelState,
     LlmProbeRequest,
     LlmProbeResponse,
     ModelCapability,
@@ -36,7 +39,6 @@ from repolearn.schemas.setup import (
     TtsProbeRequest,
     TtsProbeResponse,
 )
-from repolearn.schemas.setup import ActiveProfile, Gates, KernelState
 
 log = get_logger("setup")
 
@@ -122,7 +124,7 @@ async def setup_state(session) -> SetupStateResponse:
 def _read_preflight() -> dict[str, str]:
     import json
 
-    path = settings.run_dir / "preflight.json"
+    path = settings.run_path / "preflight.json"
     if not path.is_file():
         return {}
     try:
@@ -532,7 +534,7 @@ async def doctor(session) -> list[dict[str, Any]]:
 
     from repolearn.core.db import check_db
     from repolearn.providers.agent_runtime import refresh_state as refresh
-    from repolearn.rendering.pdf import chromium_available
+    from repolearn.rendering.pdf import chromium_available_async
 
     checks: list[dict[str, Any]] = []
     db_ok = await check_db()
@@ -550,12 +552,18 @@ async def doctor(session) -> list[dict[str, Any]]:
             else "运行 `pnpm -C services/agent-kernel install` 并确认 npm registry 可达；否则课程将为简化版",
         }
     )
+    chromium_ok = await chromium_available_async()
     checks.append(
         {
             "name": "PDF 引擎（Chromium）",
-            "status": "ok" if chromium_available() else "degraded",
-            "detail": gates.get("g2", "unknown"),
-            "hint": None if chromium_available() else "运行 `python -m playwright install chromium`；否则导出将降级为打印视图",
+            "status": "ok" if chromium_ok else "degraded",
+            # `detail` 给的是**这次真 launch 的结果**，preflight 里的 g2 只作旁证：
+            # 只看 preflight 等于相信"另一个进程说过它能起来"，而 PDF 是在本进程里
+            # 渲染的（异步上下文还得走 `chromium_available_async`，见 pdf.py）。
+            "detail": f"launch={'ok' if chromium_ok else 'failed'} · preflight g2={gates.get('g2', 'unknown')}",
+            "hint": None
+            if chromium_ok
+            else "运行 `python -m playwright install chromium`；否则导出将降级为打印视图",
         }
     )
     checks.append(
@@ -594,12 +602,15 @@ async def doctor(session) -> list[dict[str, Any]]:
     )
     checks.append(
         {
-            "name": "搜索模式",
+            "name": "GitHub 接入点",
             "status": "ok",
-            "detail": settings.search,
-            "hint": "课程量超过约 5000 条时设置 REPOLEARN_SEARCH=fts",
+            "detail": f"{settings.github_api} · token={'是' if settings.github_token else '否'}",
+            "hint": None
+            if settings.github_api == "https://api.github.com"
+            else "已指向自定义端点（GHE/镜像）；端点返回内容按不可信数据处理",
         }
     )
+    checks.append(await _search_check(session))
     try:
         async with session.begin_nested():
             await session.execute(text("SELECT 1"))
@@ -607,6 +618,39 @@ async def doctor(session) -> list[dict[str, Any]]:
     except Exception as exc:  # noqa: BLE001
         checks.append({"name": "会话", "status": "fail", "detail": str(exc)[:200], "hint": "重启服务"})
     return checks
+
+
+async def _search_check(session) -> dict[str, Any]:
+    """搜索项必须报**实际生效模式**，而不是配置值（hardening spec P2-4）。
+
+    v1 直接回显 `settings.search`，而 `settings.search` 正是那个"说了 fts 却没人
+    实现"的开关——照抄它等于把谎言换个地方说。判定顺序固定为：先看库里有没有
+    `course_search`（表存在才算有索引），再看 SQLite 版本够不够 trigram，最后才
+    看用户配了什么。三者任意一环不满足，用户看到的就是 `degraded` + 原因。
+    """
+    from repolearn.services.search import fts_capability
+
+    cap = await fts_capability(session)
+    if settings.search == "scan":
+        return {
+            "name": "搜索",
+            "status": "ok",
+            "detail": "scan（LIKE，limit ≤ 50）",
+            "hint": "课程量 > 5000 时设 REPOLEARN_SEARCH=fts（需要 SQLite ≥ 3.34 的 FTS5 trigram）",
+        }
+    if cap.available:
+        return {
+            "name": "搜索",
+            "status": "ok",
+            "detail": "fts（trigram，中文 ≥3 字）",
+            "hint": "1–2 字查询自动回落 LIKE：trigram 的匹配单位是 3 字符",
+        }
+    return {
+        "name": "搜索",
+        "status": "degraded",
+        "detail": f"scan（{cap.reason}）",
+        "hint": f"配置值是 fts，但当前运行时用不了 FTS5 trigram：{cap.detail}。升级 Python/SQLite 后自动启用",
+    }
 
 
 def _ts_available() -> bool:

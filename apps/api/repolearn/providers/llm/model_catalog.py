@@ -80,7 +80,7 @@ def enrich(provider: str, models: list[ModelInfo]) -> list[ModelInfo]:
 def catalog_rows() -> list[dict[str, object]]:
     """供 `model_catalog` 表首次填充/刷新使用。"""
     rows: list[dict[str, object]] = []
-    for (provider, model_id), (ctx, pin, pout, caps) in CATALOG.items():
+    for (provider, model_id), (ctx, pin, pout, _caps) in CATALOG.items():
         c = capabilities_for(provider, model_id)
         rows.append(
             {

@@ -1,4 +1,6 @@
 {
+  "archive_url": "https://github.com/microsoft/autogen/{archive_format}{/ref}",
+  "clone_url": "https://github.com/microsoft/autogen.git",
   "default_branch": "main",
   "description": "A programming framework for agentic AI",
   "full_name": "microsoft/autogen",

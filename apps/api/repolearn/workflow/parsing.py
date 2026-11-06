@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import jsonschema
@@ -131,7 +130,7 @@ def check_curriculum(curriculum: dict) -> list[str]:
     missing = required - keys
     if missing:
         errors.append(f"缺少章节：{', '.join(sorted(missing))}")
-    lessons = [l for s in sections if isinstance(s, dict) for l in (s.get("lessons") or [])]
+    lessons = [item for s in sections if isinstance(s, dict) for item in (s.get("lessons") or [])]
     if len(lessons) < 10:
         errors.append(f"课时数量 {len(lessons)} 少于 10")
     if len(lessons) > 12:

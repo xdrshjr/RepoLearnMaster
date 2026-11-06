@@ -26,6 +26,7 @@ export type ErrorCode =
   | 'CONTRACT_VIOLATION'
   | 'IDEMPOTENCY_MISMATCH'
   | 'PROFILE_CONFLICT'
+  | 'VALIDATION_FAILED'
   | 'API_UNREACHABLE'
   | 'INTERNAL';
 
@@ -192,6 +193,16 @@ export const ERROR_COPY: Record<ErrorCode, ErrorCopy> = {
     message: '两次激活 profile 撞上了唯一索引。',
     hint: '再点一次即可，第二次会成功。',
     retryable: true,
+  },
+  // 第 20 个码（hardening spec P0-4）。`retryable: false` 是关键：重试同一个
+  // 非法 offset 只会再拿到同一个 422；给用户一个"重试"按钮等于骗他。
+  VALIDATION_FAILED: {
+    code: 'VALIDATION_FAILED',
+    http: 422,
+    title: '请求参数不合法',
+    message: '地址栏里的参数超出了允许范围。',
+    hint: '分页规则：fts 模式用 offset（0–200），scan 模式用 cursor；其它筛选条件请看提示里的范围说明。',
+    retryable: false,
   },
   INTERNAL: {
     code: 'INTERNAL',

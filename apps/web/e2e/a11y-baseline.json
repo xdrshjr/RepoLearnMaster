@@ -1,0 +1,10 @@
+{
+  "$comment": "T-A11Y-1 已知例外白名单（spec §3.3.3 / §7.7 A4）。每一行都必须有 reason，否则 a11y.spec.ts 直接判失败——没有 reason 的基线会变成垃圾桶。excludes 是“第三方 DOM / 不可控子树”，entries 是“我们自己代码里已知、且已评估过的例外”。",
+  "excludes": [
+    {
+      "selector": ".monaco-editor",
+      "reason": "第三方编辑器内部控件，不可控；已在 T-A11Y-4 单独覆盖我们自己的控件"
+    }
+  ],
+  "entries": []
+}

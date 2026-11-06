@@ -16,12 +16,13 @@ from __future__ import annotations
 import contextlib
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from repolearn import __version__
 from repolearn.core.config import settings
 from repolearn.core.db import dispose_engine
-from repolearn.core.errors import AppError, ERRORS
+from repolearn.core.errors import ERRORS, AppError
 from repolearn.core.logging import RequestContextMiddleware, configure_logging, get_logger
 from repolearn.core.security import CSRF_COOKIE, new_csrf_token
 from repolearn.routers import ALL_ROUTERS
@@ -57,7 +58,7 @@ async def lifespan(app: FastAPI):
     migrated = await _check_migration()
     if not migrated:
         log.error("migration_missing", hint="运行 `python -m repolearn.cli migrate` 或 `alembic upgrade head`")
-    from repolearn.jobs.runner import reap_orphaned_generations, start_runner, stop_runner, requeue_stale_jobs
+    from repolearn.jobs.runner import reap_orphaned_generations, requeue_stale_jobs, start_runner, stop_runner
 
     try:
         await reap_orphaned_generations()
@@ -117,6 +118,36 @@ def create_app() -> FastAPI:
         log.info("app_error", code=exc.code, status=exc.status, path=request.url.path, req_id=req_id)
         return JSONResponse(status_code=exc.status, content=exc.to_body(req_id))
 
+    @app.exception_handler(RequestValidationError)
+    async def _request_validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        """参数校验失败 → **契约里的错误信封**，不是 FastAPI 的 `{"detail": [...]}`。
+
+        为什么非改不可：`Query(ge=0, le=200)` 这类声明由 FastAPI 在进入处理函数
+        之前拦下，默认响应体里没有 `error.code`。前端 `client.ts` 读不到 `code`
+        就会回落成 `INTERNAL`，于是"offset 填了 999"在用户眼里仍然是"服务内部
+        错误"——这正是 spec P0-4 要消灭的那类谎言，只是从 500 挪到了 422。
+        统一转成第 20 个码之后，`retryable=false`、可定位到具体字段，前端文案表
+        也能命中。
+        """
+        from repolearn.core.logging import current_request_id
+
+        req_id = current_request_id()
+        fields = [
+            {
+                "field": ".".join(str(part) for part in err.get("loc", ()) if part != "body"),
+                "message": str(err.get("msg", "")),
+            }
+            for err in exc.errors()[:5]
+        ]
+        failure = AppError(
+            "VALIDATION_FAILED",
+            "请求参数不符合契约",
+            hint="检查参数名与取值范围（如 offset ≤ 200、q 长度 ≤ 120、mode ∈ auto|scan|fts）",
+            details={"fields": fields},
+        )
+        log.info("validation_error", path=request.url.path, fields=fields, req_id=req_id)
+        return JSONResponse(status_code=failure.status, content=failure.to_body(req_id))
+
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, exc: Exception) -> JSONResponse:
         from repolearn.core.logging import current_request_id, redact
@@ -128,7 +159,7 @@ def create_app() -> FastAPI:
 
     @app.get("/v1/errors", include_in_schema=False)
     async def list_error_codes() -> dict:
-        """把错误码表暴露给前端调试用（也是 19 个码的单一真源）。"""
+        """把错误码表暴露给前端调试用（也是 20 个码的单一真源）。"""
         return {
             "count": len(ERRORS),
             "codes": [

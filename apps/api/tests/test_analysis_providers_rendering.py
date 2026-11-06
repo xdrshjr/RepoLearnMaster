@@ -6,23 +6,21 @@ import asyncio
 
 from repolearn.analysis import analyze
 from repolearn.analysis.callgraph import build_call_graph
-from repolearn.analysis.key_chain import pick_key_chains
 from repolearn.analysis.symbols import TS_AVAILABLE, outline
+from repolearn.core.errors import AppError
 from repolearn.providers.agent_runtime import (
     RuntimeState,
     _parse_sse,
     refresh_state,
     reset_state_for_tests,
 )
-from repolearn.providers.compat_map import PROTOCOL_FAMILY
-from repolearn.providers.registry import adapter_for
 from repolearn.providers.budget_guard import CallGuard, JobBudget, estimate_tokens, usd_for
-from repolearn.providers.compat_map import compat_for, default_base_url
+from repolearn.providers.compat_map import PROTOCOL_FAMILY, compat_for, default_base_url
 from repolearn.providers.llm.model_catalog import capabilities_for, price_known
+from repolearn.providers.registry import adapter_for
 from repolearn.providers.tts.doubao import estimate_duration_ms, split_sentences, text_hash
 from repolearn.rendering.book_layout import blocks_to_html, build_chapters
 from repolearn.rendering.mermaid import parse_mermaid, render_svg
-from repolearn.core.errors import AppError
 
 SRC = (
     '"""模块说明。"""\n'

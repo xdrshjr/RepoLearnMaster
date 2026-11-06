@@ -7,8 +7,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from sqlalchemy import ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -45,6 +43,15 @@ class CourseVersion(Base):
     total_minutes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     owner_user_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     visibility: Mapped[str] = mapped_column(String(12), default="public", nullable=False)
+    #: 这次版本是"从哪一门升级上来的"（hardening spec §6.3）。
+    #: `ON DELETE SET NULL` 而不是 `RESTRICT`：旧版本被 prune/软删清理时，新版本
+    #: 不该跟着删，也不该阻止清理；UI 只需要一层追溯（"基于 abc1234 升级"）。
+    upgraded_from_id: Mapped[str | None] = mapped_column(
+        String(40),
+        ForeignKey("course_versions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     created_at: Mapped[Ts]
     updated_at: Mapped[OptTs]
     published_at: Mapped[OptTs]

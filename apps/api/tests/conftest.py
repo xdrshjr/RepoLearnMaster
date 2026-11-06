@@ -21,6 +21,11 @@ os.environ["REPOLEARN_OBJECT_ROOT"] = str(_TMP / "objects")
 os.environ["REPOLEARN_SECRET_KEY"] = "dGVzdC1rZXktMzItYnl0ZXMtbG9uZy1mb3ItcmVwb2xlYXJuISE="
 os.environ["REPOLEARN_INTERNAL_TOKEN"] = "test-internal-token"
 os.environ["REPOLEARN_AGENT_RUNTIME"] = "template"
+# 出站端点指向一个**几乎肯定没有进程**的本地端口（hardening spec §4.1 第 18 行）。
+# 目的不是省事，而是让任何漏 mock 的出站调用**当场连接失败**，而不是悄悄打到真实
+# GitHub —— 后者会让测试套件变成隐性的网络依赖，在 CI 里表现成"偶发红"。
+os.environ.setdefault("REPOLEARN_GITHUB_API_BASE", "http://127.0.0.1:9911")
+os.environ.setdefault("REPOLEARN_GITHUB_WEB_BASE", "http://127.0.0.1:9911")
 os.environ["REPOLEARN_HEARTBEAT_SECONDS"] = "3"
 os.environ["REPOLEARN_JOB_STALE_SECONDS"] = "30"
 
@@ -78,6 +83,13 @@ async def clean_db():
             if table.name == "alembic_version":
                 continue
             await conn.execute(text(f'DELETE FROM "{table.name}"'))
+        # FTS5 虚拟表**不进 `Base.metadata`**，所以上面的循环看不到它。不清的话
+        # 索引行会跨用例泄漏，产生"单独跑绿、全量跑红"的经典幻觉（spec F18）。
+        # `try/except` 是为了容忍"这次迁移没建表"（老 SQLite 上能力探测跳过建表）。
+        try:
+            await conn.execute(text("DELETE FROM course_search"))
+        except Exception:  # noqa: BLE001 - 表不存在 = 没有行要清
+            pass
         await conn.execute(text("PRAGMA foreign_keys=ON"))
 
 

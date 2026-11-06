@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 from repolearn.models import QuizAttempt
 from repolearn.services import object_store
 

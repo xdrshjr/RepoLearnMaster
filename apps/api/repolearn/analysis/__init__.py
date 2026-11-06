@@ -7,8 +7,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 from repolearn.analysis.callgraph import CallGraph, build_call_graph
 from repolearn.analysis.key_chain import KeyChain, describe_chain, pick_key_chains

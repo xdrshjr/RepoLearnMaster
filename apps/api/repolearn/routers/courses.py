@@ -13,20 +13,22 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, Query, Response, status
 
-from repolearn.core.errors import AppError
 from repolearn.models import Commit
 from repolearn.routers.deps import SessionDep, body_hash, require_csrf, require_internal_token
 from repolearn.schemas.course import (
     AnchorItem,
     AnchorListResponse,
-    CourseCreateRequest,
     CourseCreatedResponse,
+    CourseCreateRequest,
     CourseDetail,
     CourseListResponse,
     FileContentResponse,
     RebuildRequest,
+    UpgradePlanResponse,
+    UpgradeRequest,
+    UpgradeStartedResponse,
 )
-from repolearn.services import course_service
+from repolearn.services import course_service, upgrade_service
 
 router = APIRouter(prefix="/v1/courses", tags=["courses"], dependencies=[Depends(require_internal_token)])
 
@@ -57,14 +59,27 @@ async def list_courses(
     session: SessionDep,
     status_: Annotated[str | None, Query(alias="status")] = None,
     owner: str | None = None,
-    q: str | None = None,
+    q: Annotated[str | None, Query(max_length=120)] = None,
     limit: int = 20,
     cursor: str | None = None,
+    mode: Annotated[str, Query(pattern="^(auto|scan|fts)$")] = "auto",
+    offset: Annotated[int, Query(ge=0, le=200)] = 0,
 ) -> CourseListResponse:
-    items, next_cursor = await course_service.list_courses(
-        session, status=status_, owner=owner, q=q, limit=limit, cursor=cursor
+    """课程列表。
+
+    `q` 的 `max_length=120` 与 `offset` 的 `0..200` 都是**契约的一环**（spec
+    §5.1.1 早就写死了范围，而 v1 的 router 一个约束都没有——文档与实现分叉时，
+    用户遇到的是"输了一大段话，服务端 500"）。
+
+    `offset` 只在 fts **生效**时才有意义：scan 用 keyset 游标，两者混用会让用户
+    以为"翻到第二页"而实际拿到第一页的重复行。但"是否生效"要等 `plan_search`
+    按运行时能力与查询长度算完才知道（`mode=auto` 时尤甚），因此在
+    `course_service.list_courses` 里判，不在这里按参数值猜——按参数值猜的后果是
+    "同一份请求在装得上 fts 的机器上能用、在装不上的机器上 422"。
+    """
+    return await course_service.list_courses(
+        session, status=status_, owner=owner, q=q, limit=limit, cursor=cursor, mode=mode, offset=offset
     )
-    return CourseListResponse(items=items, next_cursor=next_cursor)
 
 
 @router.get("/{course_id}", response_model=CourseDetail)
@@ -88,6 +103,37 @@ async def rebuild(
         session, course_id, from_stage=payload.from_stage, reason=payload.reason
     )
     return {"job_id": job_id}
+
+
+@router.post(
+    "/{course_id}/upgrade",
+    status_code=status.HTTP_200_OK,
+    response_model=UpgradePlanResponse | UpgradeStartedResponse,
+)
+async def upgrade_course(
+    course_id: str,
+    payload: UpgradeRequest,
+    session: SessionDep,
+    response: Response,
+    _csrf: None = Depends(require_csrf),
+):
+    """仓库有新 commit 时生成**新版本**（spec §3.5 / §5.1.2）。
+
+    与 `/rebuild` 的语义区别必须刻在两处：这里是**新的 sha**、且旧版本**全程保持
+    可读**（不置 `generating`）；`/rebuild` 是同一个 sha 覆盖本版本内容。混用会
+    让用户"以为看了新版，其实旧版被打断"。
+
+    三种终态：`200 {mode: none|partial|full}`（dry_run 或无需生成）、
+    `202 {job_id}`（真的开始生成）、`409 JOB_CONFLICT`（同一新 cache_key 已有任务）。
+    """
+    result, code = await upgrade_service.start_upgrade(
+        session,
+        course_id,
+        ref=payload.ref,
+        dry_run=payload.dry_run,
+    )
+    response.status_code = code
+    return result
 
 
 @router.delete("/{course_id}", status_code=status.HTTP_204_NO_CONTENT)

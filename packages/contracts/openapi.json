@@ -49,6 +49,24 @@
         "title": "ActiveProfile",
         "type": "object"
       },
+      "AffectedLesson": {
+        "properties": {
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "title": "AffectedLesson",
+        "type": "object"
+      },
       "AnchorItem": {
         "properties": {
           "file": {
@@ -692,6 +710,16 @@
             "title": "Cover Palette",
             "type": "string"
           },
+          "highlights": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HighlightGroup"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "id": {
             "title": "Id",
             "type": "string"
@@ -748,12 +776,28 @@
       },
       "CourseListResponse": {
         "properties": {
+          "fallback_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fallback Reason"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/CourseListItem"
             },
             "title": "Items",
             "type": "array"
+          },
+          "mode": {
+            "default": "none",
+            "title": "Mode",
+            "type": "string"
           },
           "next_cursor": {
             "anyOf": [
@@ -765,6 +809,28 @@
               }
             ],
             "title": "Next Cursor"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "total": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total"
           }
         },
         "title": "CourseListResponse",
@@ -979,6 +1045,74 @@
           "version"
         ],
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "HighlightGroup": {
+        "description": "一条课程在三个可搜索字段上的高亮（未命中/未搜索时为 `None`）。",
+        "properties": {
+          "repo": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/HighlightSegment"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repo"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/HighlightSegment"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/HighlightSegment"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "HighlightGroup",
+        "type": "object"
+      },
+      "HighlightSegment": {
+        "description": "高亮片段。`marked=True` 的片段由前端渲染成 `<mark>`（**服务端不返回 HTML**）。",
+        "properties": {
+          "marked": {
+            "default": false,
+            "title": "Marked",
+            "type": "boolean"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "HighlightSegment",
         "type": "object"
       },
       "JobCancelResponse": {
@@ -3199,6 +3333,104 @@
         "title": "TtsProbeResponse",
         "type": "object"
       },
+      "UpgradePlanResponse": {
+        "description": "200：计划（dry_run 或 `mode in {none, reused}`）。",
+        "properties": {
+          "affected_lessons": {
+            "items": {
+              "$ref": "#/components/schemas/AffectedLesson"
+            },
+            "title": "Affected Lessons",
+            "type": "array"
+          },
+          "course_id": {
+            "title": "Course Id",
+            "type": "string"
+          },
+          "from_sha": {
+            "default": "",
+            "title": "From Sha",
+            "type": "string"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "stats": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Stats",
+            "type": "object"
+          },
+          "to_sha": {
+            "default": "",
+            "title": "To Sha",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "course_id"
+        ],
+        "title": "UpgradePlanResponse",
+        "type": "object"
+      },
+      "UpgradeRequest": {
+        "description": "`POST /v1/courses/{id}/upgrade`。\n\n`dry_run=True` 只算不改：返回受影响课时清单供 UI 抽屉展示，**不写库**。\n注意它并不免费——走到那一步已经下载并解包了整包 tarball，因此服务端还有\n三道闸（体积上限 / 计划缓存 / 20s 预算，spec §3.5.2）。",
+        "properties": {
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "maxLength": 120,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ref"
+          }
+        },
+        "title": "UpgradeRequest",
+        "type": "object"
+      },
+      "UpgradeStartedResponse": {
+        "description": "202：真的开始生成新版本。旧版本全程保持可读（与 `/rebuild` 的关键区别）。",
+        "properties": {
+          "course_id": {
+            "title": "Course Id",
+            "type": "string"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "course_id",
+          "mode"
+        ],
+        "title": "UpgradeStartedResponse",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -3522,6 +3754,7 @@
     },
     "/v1/courses": {
       "get": {
+        "description": "课程列表。\n\n`q` 的 `max_length=120` 与 `offset` 的 `0..200` 都是**契约的一环**（spec\n§5.1.1 早就写死了范围，而 v1 的 router 一个约束都没有——文档与实现分叉时，\n用户遇到的是\"输了一大段话，服务端 500\"）。\n\n`offset` 只在 fts **生效**时才有意义：scan 用 keyset 游标，两者混用会让用户\n以为\"翻到第二页\"而实际拿到第一页的重复行。但\"是否生效\"要等 `plan_search`\n按运行时能力与查询长度算完才知道（`mode=auto` 时尤甚），因此在\n`course_service.list_courses` 里判，不在这里按参数值猜——按参数值猜的后果是\n\"同一份请求在装得上 fts 的机器上能用、在装不上的机器上 422\"。",
         "operationId": "list_courses_v1_courses_get",
         "parameters": [
           {
@@ -3563,6 +3796,7 @@
             "schema": {
               "anyOf": [
                 {
+                  "maxLength": 120,
                   "type": "string"
                 },
                 {
@@ -3596,6 +3830,29 @@
                 }
               ],
               "title": "Cursor"
+            }
+          },
+          {
+            "in": "query",
+            "name": "mode",
+            "required": false,
+            "schema": {
+              "default": "auto",
+              "pattern": "^(auto|scan|fts)$",
+              "title": "Mode",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "maximum": 200,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
             }
           },
           {
@@ -4701,6 +4958,83 @@
         "summary": "Recap",
         "tags": [
           "progress"
+        ]
+      }
+    },
+    "/v1/courses/{course_id}/upgrade": {
+      "post": {
+        "description": "仓库有新 commit 时生成**新版本**（spec §3.5 / §5.1.2）。\n\n与 `/rebuild` 的语义区别必须刻在两处：这里是**新的 sha**、且旧版本**全程保持\n可读**（不置 `generating`）；`/rebuild` 是同一个 sha 覆盖本版本内容。混用会\n让用户\"以为看了新版，其实旧版被打断\"。\n\n三种终态：`200 {mode: none|partial|full}`（dry_run 或无需生成）、\n`202 {job_id}`（真的开始生成）、`409 JOB_CONFLICT`（同一新 cache_key 已有任务）。",
+        "operationId": "upgrade_course_v1_courses__course_id__upgrade_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "course_id",
+            "required": true,
+            "schema": {
+              "title": "Course Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Internal-Token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Internal-Token"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpgradeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/UpgradePlanResponse"
+                    },
+                    {
+                      "$ref": "#/components/schemas/UpgradeStartedResponse"
+                    }
+                  ],
+                  "title": "Response Upgrade Course V1 Courses  Course Id  Upgrade Post"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upgrade Course",
+        "tags": [
+          "courses"
         ]
       }
     },

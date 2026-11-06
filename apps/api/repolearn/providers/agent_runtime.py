@@ -23,8 +23,8 @@ import asyncio
 import json
 import shutil
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable
 
 from repolearn.core.clock import utcnow
 from repolearn.core.config import settings
@@ -384,7 +384,7 @@ class ExecCliRuntime:
         deadline = req.budget.deadline_ms / 1000
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=deadline)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             proc.kill()
             return events, AgentRunResult(
                 status="budget_exceeded",

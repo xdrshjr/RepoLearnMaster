@@ -18,7 +18,7 @@ from repolearn.core.ids import new_id
 from repolearn.core.logging import get_logger
 from repolearn.jobs import queue
 from repolearn.models import BookChapter, BookVersion, CourseVersion, PdfExport
-from repolearn.rendering.pdf import chromium_available
+from repolearn.rendering.pdf import chromium_available_async
 from repolearn.schemas.book import (
     BookChapterDetail,
     BookCreatedResponse,
@@ -156,8 +156,11 @@ async def create_pdf(session, book_id: str, *, engine: str | None) -> str:
         raise AppError("COURSE_NOT_READY", "书籍还没生成完成")
 
     chosen = engine or settings.pdf_default_engine
-    if chosen == "chromium" and not chromium_available():
+    if chosen == "chromium" and not await chromium_available_async():
         # G2 失败：**不生成假 PDF**，直接标成 browser-print 并返回可用的打印视图。
+        # 必须是 async 版本：sync 版在事件循环里调用**恒返回 False**（playwright
+        # sync API 明确禁止），于是装了 Chromium 也会被当成"没有"，PDF 永远是
+        # 打印视图——这正是 R16 的真病因。
         chosen = "browser-print"
     key = pdf_cache_key(book_id, chosen)
     existing = (

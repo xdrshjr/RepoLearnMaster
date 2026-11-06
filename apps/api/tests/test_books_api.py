@@ -145,7 +145,12 @@ async def test_pdf_request_degrades_when_chromium_missing(client, ready_course, 
     """G2 失败时**不生成假 PDF**：直接标成 browser-print 并给打印视图地址。"""
     import repolearn.services.book_service as bs
 
-    monkeypatch.setattr(bs, "chromium_available", lambda: False)
+    async def _no_chromium() -> bool:
+        return False
+
+    # 打的是 async 版本：`create_pdf` 是 async 处理器，sync 版在事件循环里会
+    # **恒返回 False**（playwright sync API 禁止），用它当替身等于什么都没验。
+    monkeypatch.setattr(bs, "chromium_available_async", _no_chromium)
     book_id = await _make_book(ready_course["course_id"])
     resp = await client.post(f"/v1/books/{book_id}/pdf", json={"engine": "chromium"})
     assert resp.status_code == 202
@@ -156,6 +161,23 @@ async def test_pdf_request_degrades_when_chromium_missing(client, ready_course, 
     body = status_resp.json()
     assert body["engine"] == "browser-print"
     assert body["print_view_url"].endswith("?print=1")
+
+
+async def test_chromium_available_async_survives_event_loop(monkeypatch):
+    """`chromium_available_async` 必须在事件循环里拿到 sync 版的真实结果。
+
+    回归的是 R16 的**真病因**（不是"判据不同源"）：playwright 的 sync API 一旦
+    发现自己处在运行中的事件循环里就直接抛，而 `chromium_available()` 外面包着
+    `except Exception: return False`。于是任何 async 处理器里调用它都恒得 False，
+    "装了 Chromium 也永远是打印视图"，而 Doctor 也永远显示 degraded。
+    """
+    import repolearn.rendering.pdf as pdf_mod
+
+    monkeypatch.setattr(pdf_mod, "chromium_available", lambda: True)
+    assert await pdf_mod.chromium_available_async() is True
+
+    monkeypatch.setattr(pdf_mod, "chromium_available", lambda: False)
+    assert await pdf_mod.chromium_available_async() is False
 
 
 async def test_pdf_requires_ready_book(client, ready_course):

@@ -21,7 +21,6 @@ import asyncio
 import hashlib
 import json
 import sys
-from pathlib import Path
 
 from repolearn import __version__
 from repolearn.core.config import REPO_ROOT, settings
@@ -118,7 +117,7 @@ async def _seed_demo() -> int:
         Step,
         User,
     )
-    from repolearn.services.object_store import mirror_dir, put
+    from repolearn.services.object_store import mirror_dir
 
     sha = "demo0000" + hashlib.sha256(b"repolearn-demo").hexdigest()[:56]
     sha8 = sha[:8]
@@ -561,6 +560,97 @@ def cmd_info(_args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# reindex-search                                                               #
+# --------------------------------------------------------------------------- #
+
+
+def cmd_reindex_search(args: argparse.Namespace) -> int:
+    """重建 FTS 索引（幂等）。**能力不具备时打印一行并 exit 0**。
+
+    这是"后悔药"：迁移时用过一次 batch 重建、或者触发器被误删、或者老库从没建过
+    索引，都靠它把状态拉回一致。因此它必须是**幂等**且**在能力缺失时不失败**的——
+    一条维护命令在"能力本来就没有"的机器上变红，只会训练人忽略它（spec P0-2）。
+    """
+    import sqlite3
+
+    from sqlalchemy import create_engine
+
+    from repolearn.services import search_ddl
+    from repolearn.services.search import sqlite_supports_trigram
+
+    if not sqlite_supports_trigram():
+        print(f"fts unavailable (sqlite {sqlite3.sqlite_version}), nothing to do")
+        return 0
+
+    url = settings.resolved_database_url.replace("+aiosqlite", "")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            try:
+                conn.exec_driver_sql(
+                    "CREATE VIRTUAL TABLE temp.__probe USING fts5(x, tokenize='trigram')"
+                )
+                conn.exec_driver_sql("DROP TABLE temp.__probe")
+            except Exception:  # noqa: BLE001 - 能力不具备 = 无需维护
+                print(f"fts unavailable (sqlite {sqlite3.sqlite_version}), nothing to do")
+                return 0
+            for stmt in search_ddl.DROP_TRIGGERS_SQL:
+                conn.exec_driver_sql(stmt)
+            conn.exec_driver_sql(f"DROP TABLE IF EXISTS {search_ddl.FTSTable}")
+            conn.exec_driver_sql(search_ddl.CREATE_TABLE_SQL)
+            conn.exec_driver_sql(search_ddl.TRUNCATE_SQL)
+            conn.exec_driver_sql(search_ddl.BACKFILL_SQL)
+            for ddl in search_ddl.trigger_ddl():
+                conn.exec_driver_sql(ddl)
+            indexed = int(conn.exec_driver_sql(f"SELECT count(*) FROM {search_ddl.FTSTable}").scalar() or 0)
+            triggers = int(conn.exec_driver_sql(search_ddl.COUNT_TRIGGERS_SQL).scalar() or 0)
+            versions = int(conn.exec_driver_sql("SELECT count(*) FROM course_versions").scalar() or 0)
+            if triggers != search_ddl.TRIGGER_COUNT:
+                # 触发器对不上就是"搜索从此不再更新"的同义词，必须让门禁红。
+                print(f"reindex-search FAILED: triggers={triggers} expected={search_ddl.TRIGGER_COUNT}")
+                return 1
+            print(
+                f"indexed={indexed} rows={versions} dropped={0} triggers={triggers} batch={args.batch}"
+            )
+    finally:
+        engine.dispose()
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# e2e-report                                                                   #
+# --------------------------------------------------------------------------- #
+
+
+def cmd_e2e_report(args: argparse.Namespace) -> int:
+    """读最近一次真链路结果（`var/e2e/last-run.json`）。
+
+    CI artifact 之外的人读入口：失败时最常问的是"到底跑了几条、过了几条"，
+    而这个答案不该要求人去下载一个 zip。
+    """
+    path = settings.repo_root / "var" / "e2e" / "last-run.json"
+    if not path.is_file():
+        print("还没有跑过真链路 E2E（node scripts/e2e-real.mjs）")
+        return 0
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    print(
+        "runId={runId} passed={passed} failed={failed} duration={durationMs}ms".format(
+            runId=data.get("runId", "-"),
+            passed=data.get("passed", 0),
+            failed=data.get("failed", 0),
+            durationMs=data.get("durationMs", 0),
+        )
+    )
+    for spec in data.get("specs") or []:
+        print(f"  - {spec}")
+    return 0
+
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="repolearn",
@@ -592,6 +682,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="打印 Gate 0 三态与各依赖状态")
     doctor.set_defaults(func=cmd_doctor)
+
+    reindex = sub.add_parser("reindex-search", help="重建 FTS 搜索索引（幂等；能力缺失时 exit 0）")
+    reindex.add_argument("--batch", type=int, default=500, help="回填批大小（默认 500）")
+    reindex.set_defaults(func=cmd_reindex_search)
+
+    e2e = sub.add_parser("e2e-report", help="打印最近一次真链路 E2E 结果摘要")
+    e2e.add_argument("--json", action="store_true", help="输出完整 JSON")
+    e2e.set_defaults(func=cmd_e2e_report)
 
     info = sub.add_parser("info", help="打印当前配置摘要")
     info.set_defaults(func=cmd_info)

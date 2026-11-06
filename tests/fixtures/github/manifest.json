@@ -1,0 +1,58 @@
+{
+  "commits": {
+    "v1": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+    "v2": "2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c"
+  },
+  "snapshots": {
+    "tiny_v1": {
+      "files": [
+        {
+          "bytes": 656,
+          "path": "README.md",
+          "sha256": "b51c21add9b69fc026962dc19cc3f6f32145fbd8a9df4adb111ae1a441ef2c88"
+        },
+        {
+          "bytes": 543,
+          "path": "tiny/agent.py",
+          "sha256": "60e2231d949258d7ff046a9f6ccb366dab8d25bfd344efd6a31b6bc9dc921ee4"
+        },
+        {
+          "bytes": 597,
+          "path": "tiny/bus.py",
+          "sha256": "67033e23d7d35b39c353de2efb6788358b06bcf34fa812c2e1a6f17a1bd981e6"
+        },
+        {
+          "bytes": 367,
+          "path": "tiny/main.py",
+          "sha256": "7fed25f99d128dadbd8ea9e93255500038475ac04f26272dfa835c47624f00ee"
+        }
+      ],
+      "root": "tests/fixtures/repos/tiny_v1"
+    },
+    "tiny_v2": {
+      "files": [
+        {
+          "bytes": 656,
+          "path": "README.md",
+          "sha256": "b51c21add9b69fc026962dc19cc3f6f32145fbd8a9df4adb111ae1a441ef2c88"
+        },
+        {
+          "bytes": 805,
+          "path": "tiny/agent.py",
+          "sha256": "8aa13bc8a35f10949d4e407773d9b070a4d837f9085f713e7d22c7f4fc5bad4b"
+        },
+        {
+          "bytes": 367,
+          "path": "tiny/main.py",
+          "sha256": "7fed25f99d128dadbd8ea9e93255500038475ac04f26272dfa835c47624f00ee"
+        },
+        {
+          "bytes": 784,
+          "path": "tiny/router.py",
+          "sha256": "56b00d4572fa4be671f7654a902783465518d61ff4385a7730e968e5b18493cd"
+        }
+      ],
+      "root": "tests/fixtures/repos/tiny_v2"
+    }
+  }
+}

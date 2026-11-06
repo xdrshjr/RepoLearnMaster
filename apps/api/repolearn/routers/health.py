@@ -27,7 +27,7 @@ router = APIRouter(tags=["system"])
 
 
 def _gates() -> dict[str, str]:
-    path = settings.run_dir / "preflight.json"
+    path = settings.run_path / "preflight.json"
     if not path.is_file():
         return {"g1": "unknown", "g2": "unknown", "g3": "unknown"}
     try:

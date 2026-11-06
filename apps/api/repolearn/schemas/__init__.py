@@ -27,7 +27,7 @@ from repolearn.schemas.job import JobDetail, JobListResponse, MetricsResponse
 from repolearn.schemas.lesson import LessonBrief, LessonDetail, LessonListResponse
 from repolearn.schemas.note import NoteCreate, NoteDetail, NoteListResponse, NotePatch
 from repolearn.schemas.playback import PlaybackBundle, StepBundle
-from repolearn.schemas.progress import ProgressUpdate, ProgressResponse
+from repolearn.schemas.progress import ProgressResponse, ProgressUpdate
 from repolearn.schemas.question import AskRequest, QuestionDetail, QuestionListResponse
 from repolearn.schemas.setup import (
     DoctorCheck,

@@ -1,0 +1,44 @@
+{
+  "commit": {
+    "author": {
+      "date": "2026-01-01T00:00:00Z"
+    },
+    "message": "chore(tiny): initial import"
+  },
+  "files": [
+    {
+      "additions": 17,
+      "changes": 17,
+      "deletions": 0,
+      "filename": "README.md",
+      "patch": "@@ -0,0 +1,17 @@\n+# tiny-agent\n+\n+一个**用来当夹具**的极小 Python 仓库：只演示「agent 把消息交给传输层」这一条链路。\n",
+      "status": "added"
+    },
+    {
+      "additions": 20,
+      "changes": 20,
+      "deletions": 0,
+      "filename": "tiny/agent.py",
+      "patch": "@@ -0,0 +1,20 @@\n+\"\"\"TinyAgent：消息的发出方。\n+\n+传输层从 `default_bus()` 取，Agent 自己不认识 `MessageBus`——这条边界就是 v2 能把\n",
+      "status": "added"
+    },
+    {
+      "additions": 15,
+      "changes": 15,
+      "deletions": 0,
+      "filename": "tiny/bus.py",
+      "patch": "@@ -0,0 +1,15 @@\n+\"\"\"进程内消息总线：只保留「谁说了什么」的追加日志。\n+\n+刻意不用队列与线程：夹具里的代码要能被静态分析一眼读完，任何异步细节都会让\n",
+      "status": "added"
+    },
+    {
+      "additions": 16,
+      "changes": 16,
+      "deletions": 0,
+      "filename": "tiny/main.py",
+      "patch": "@@ -0,0 +1,16 @@\n+\"\"\"最小可跑入口：两个 agent 共用一条总线，各说一句话。\"\"\"\n+\n+from tiny.agent import TinyAgent, default_bus\n",
+      "status": "added"
+    }
+  ],
+  "html_url": "https://github.com/microsoft/autogen/commit/1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+  "sha": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b"
+}

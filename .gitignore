@@ -24,6 +24,9 @@ __pycache__/
 # --- Node / Next.js ---
 node_modules/
 .next/
+# 真链路 E2E 用的独立构建目录（`REPOLEARN_NEXT_DIST_DIR=.next-e2e`，避免与
+# `start.ps1` 的 `next dev` 抢同一份 `.next` 而互相写坏缓存）
+.next-e2e/
 out/
 dist/
 .turbo/

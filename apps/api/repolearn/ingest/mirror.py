@@ -127,7 +127,6 @@ def ensure_readonly(sha: str) -> None:
     base = mirror_path(sha)
     if not base.exists():
         return
-    import os
     import stat
 
     for path in base.rglob("*"):

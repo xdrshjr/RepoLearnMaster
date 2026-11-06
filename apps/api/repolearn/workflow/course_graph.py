@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import inspect
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from repolearn.core.config import settings
 from repolearn.core.logging import get_logger
-from repolearn.workflow.state import CourseGenState, NODE_PROGRESS, new_state, prune_tree
+from repolearn.workflow.state import NODE_PROGRESS, CourseGenState, new_state, prune_tree
 
 log = get_logger("course_graph")
 
@@ -109,7 +110,7 @@ async def build_course_graph(ctx: NodeContext):
 
     compiled = builder.compile(checkpointer=saver)
     # 把上下文管理器挂在图对象上，便于调用方统一关闭
-    setattr(compiled, "_saver_cm", saver_cm)
+    compiled._saver_cm = saver_cm
     return compiled
 
 

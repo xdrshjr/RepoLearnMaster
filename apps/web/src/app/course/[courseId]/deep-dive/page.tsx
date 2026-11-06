@@ -8,6 +8,7 @@ import { Badge, Card, EmptyState } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Tabs } from '@/components/ui/overlay';
 import { CodePane } from '@/components/ide/code-pane';
+import { PaneSwitcher, type WorkspacePane } from '@/components/ide/pane-switcher';
 import { CallChainSheet } from '@/components/learning/call-chain-sheet';
 import { SimulationBanner } from '@/components/learning/certainty-badge';
 import { InlineAsk } from '@/components/learning/inline-ask';
@@ -16,6 +17,7 @@ import { CertaintyBadge } from '@/components/learning/certainty-badge';
 import { useCourseContext } from '@/components/shell/course-context';
 import { evidenceToAnchor, evidenceViews, useLayerData, useSyncFocus } from '@/components/learning/use-layer-data';
 import type { AskActionId } from '@/lib/ide/decorations';
+import { useIsWide } from '@/lib/ui/use-media-query';
 import { useIdeStore } from '@/stores/ide';
 import { usePlayerStore } from '@/stores/player';
 import { cn } from '@/lib/utils';
@@ -28,6 +30,11 @@ type PanelTab = 'execution' | 'variables';
  * Monaco main pane with decorations, execution/variable panel, and the streaming
  * inline-question panel that is opened either from the selection toolbar or from
  * Momo's “选中代码问 Momo”.
+ *
+ * 窄屏（`<xl`）走 `PaneSwitcher` 的三段切换（spec §3.3.2 · D30），`≥xl` 维持
+ * 双栏。断点判断用 `useIsWide()`（`matchMedia` 的 `useSyncExternalStore` 版本）：
+ * `≥xl` 时**不**渲染那三个 tab，否则既有 `learning.spec.ts` 的
+ * `getByRole('tab')` 会命中歧义。
  */
 export default function DeepDivePage() {
   const searchParams = useSearchParams();
@@ -44,9 +51,15 @@ export default function DeepDivePage() {
   const activeFile = useIdeStore((state) => state.activeFile);
   const setSelection = useIdeStore((state) => state.setSelection);
 
+  const wide = useIsWide();
+
   const [tab, setTab] = useState<PanelTab>('execution');
   const [callChainOpen, setCallChainOpen] = useState(false);
   const [pendingAction, setPendingAction] = useState<AskActionId | null>(null);
+  // `?ask=1` 深链直接落到「提问」段（窄屏才有意义，`≥xl` 时该状态不参与布局）
+  const [pane, setPane] = useState<WorkspacePane>(() =>
+    searchParams.get('ask') === '1' ? 'ask' : 'code',
+  );
 
   useSyncFocus();
 
@@ -59,6 +72,7 @@ export default function DeepDivePage() {
   useEffect(() => {
     if (searchParams.get('ask') !== '1') return;
     setAskOpen(true);
+    setPane('ask');
   }, [searchParams, setAskOpen]);
 
   const askSelection = useMemo(() => {
@@ -68,6 +82,21 @@ export default function DeepDivePage() {
     return { file, lineStart: 1, lineEnd: 1, text: '' };
   }, [selection, activeFile, paneFiles]);
 
+  const changePane = (next: WorkspacePane) => {
+    setPane(next);
+    // 切到「提问」必须保证面板真的打开：否则 `PaneSwitcher` 里那段
+    // "自动 focus 输入框"找不到 textarea，T-TOUCH-3 会红。
+    if (next === 'ask') setAskOpen(true);
+  };
+
+  const openAskPanel = (action: AskActionId) => {
+    setPendingAction(action);
+    setAskOpen(true);
+    // 窄屏下答案面板在「提问」段里，选中代码提问后自动切过去，
+    // 否则用户点了工具条却看不到任何变化。
+    setPane('ask');
+  };
+
   if (!playback) {
     return (
       <div className="p-4">
@@ -75,6 +104,139 @@ export default function DeepDivePage() {
       </div>
     );
   }
+
+  const codePane = (
+    <CodePane
+      courseId={courseId}
+      files={paneFiles}
+      codeNotes={codeNotes}
+      evidence={evidence}
+      onAsk={(next) => {
+        setSelection({ file: activeFile ?? paneFiles[0]?.path ?? '', ...next });
+        openAskPanel('explain');
+      }}
+      className="min-h-[52vh] xl:min-h-[620px]"
+    />
+  );
+
+  const executionCard = (
+    <Card className="space-y-2 p-0">
+      <Tabs
+        tabs={[
+          { value: 'execution', label: '执行模拟', badge: traceSteps.length || undefined },
+          { value: 'variables', label: '变量状态', badge: traceStep?.variables.length || undefined },
+        ]}
+        value={tab}
+        onChange={setTab}
+        ariaLabel="执行面板"
+        className="px-2 pt-1"
+      />
+      <div className="max-h-[260px] overflow-y-auto px-3 pb-3 rl-scroll-thin">
+        {tab === 'execution' ? (
+          traceSteps.length === 0 ? (
+            <p className="text-[11px] text-text-dim">本节没有执行模拟数据。</p>
+          ) : (
+            <ol className="space-y-1.5">
+              {traceSteps.map((item, index) => (
+                <li key={`${item.index}-${item.title}`}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const matching = timeline.steps.findIndex((s) => s.title === item.title);
+                      if (matching >= 0) seekGlobal(timeline.offsets[matching] ?? 0);
+                    }}
+                    className={cn(
+                      'flex w-full items-center gap-1.5 rounded-[var(--radius-sm)] px-1.5 py-1 text-left text-[11px]',
+                      index === stepIndex ? 'bg-accent-soft text-accent' : 'text-text-muted hover:bg-surface-2',
+                    )}
+                  >
+                    <span className="grid size-4 shrink-0 place-items-center rounded-full border border-current text-[9px]">
+                      {index + 1}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate">{item.title}</span>
+                    <CertaintyBadge certainty={item.certainty} />
+                  </button>
+                </li>
+              ))}
+            </ol>
+          )
+        ) : (
+          <div className="space-y-1.5">
+            {(traceStep?.variables ?? []).length === 0 ? (
+              <p className="text-[11px] text-text-dim">当前步骤没有可见变量。</p>
+            ) : (
+              (traceStep?.variables ?? []).map((variable, index) => (
+                <div key={index} className="rounded-[var(--radius-sm)] border border-border bg-code-bg px-2 py-1">
+                  <div className="flex items-baseline gap-2">
+                    <span className="font-mono text-[10px] text-accent">{String(variable.name ?? '')}</span>
+                    <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-text">
+                      {String(variable.value ?? '')}
+                    </span>
+                  </div>
+                  {typeof variable.note === 'string' ? (
+                    <p className="mt-0.5 text-[10px] text-warn">{variable.note}</p>
+                  ) : null}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+    </Card>
+  );
+
+  const notesCard =
+    codeNotes.filter((note) => note.file === activeFile).length > 0 ? (
+      <Card className="space-y-1.5">
+        <h3 className="flex items-center gap-1.5 text-xs font-semibold text-text">
+          <Braces className="size-3.5 text-accent" aria-hidden />
+          本文件代码注释
+        </h3>
+        <ul className="max-h-40 space-y-1 overflow-y-auto rl-scroll-thin">
+          {codeNotes
+            .filter((note) => note.file === activeFile)
+            .map((note) => (
+              <li key={`${note.line}-${note.text}`}>
+                <button
+                  type="button"
+                  onClick={() => openAnchor({ file: note.file, lineStart: note.line, lineEnd: note.line })}
+                  className="flex w-full gap-2 rounded-[var(--radius-sm)] px-1.5 py-1 text-left hover:bg-surface-2"
+                >
+                  <span className="shrink-0 font-mono text-[10px] text-accent">L{note.line}</span>
+                  <span className="min-w-0 flex-1 text-[11px] leading-[1.55] text-text-muted">{note.text}</span>
+                </button>
+              </li>
+            ))}
+        </ul>
+      </Card>
+    ) : null;
+
+  const askCard =
+    askOpen && askSelection ? (
+      <InlineAsk
+        courseId={courseId}
+        selection={askSelection}
+        layer="deep_dive"
+        lessonKey={lessonKey}
+        initialAction={pendingAction}
+        onJumpEvidence={(item) => openAnchor(evidenceToAnchor(item))}
+        onClose={() => {
+          setAskOpen(false);
+          setPendingAction(null);
+        }}
+      />
+    ) : (
+      <Card className="space-y-1.5">
+        <h3 className="flex items-center gap-1.5 text-xs font-semibold text-text">
+          <Terminal className="size-3.5 text-accent" aria-hidden />
+          怎么提问
+        </h3>
+        <p className="text-[11px] leading-[1.65] text-text-muted">
+          在左侧代码里选中任意几行 → 出现浮动工具条（解释这行 / 为什么这样实现 / 有什么替代方案）→
+          答案会带证据列表，点一下跳回 file:line。
+        </p>
+      </Card>
+    );
 
   return (
     <div className="flex min-h-full flex-col gap-3 p-3">
@@ -95,8 +257,7 @@ export default function DeepDivePage() {
             variant="outline"
             size="sm"
             onClick={() => {
-              setPendingAction('explain');
-              setAskOpen(true);
+              openAskPanel('explain');
             }}
             icon={<MessageSquarePlus className="size-3" aria-hidden />}
           >
@@ -134,140 +295,34 @@ export default function DeepDivePage() {
         })}
       </div>
 
-      <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,380px)]">
-        <CodePane
-          courseId={courseId}
-          files={paneFiles}
-          codeNotes={codeNotes}
-          evidence={evidence}
-          onAsk={(next) => {
-            setSelection({ file: activeFile ?? paneFiles[0]?.path ?? '', ...next });
-            setAskOpen(true);
-          }}
-          className="min-h-[480px] xl:min-h-[620px]"
-        />
-
-        <div className="space-y-3">
-          <Card className="space-y-2 p-0">
-            <Tabs
-              tabs={[
-                { value: 'execution', label: '执行模拟', badge: traceSteps.length || undefined },
-                { value: 'variables', label: '变量状态', badge: traceStep?.variables.length || undefined },
-              ]}
-              value={tab}
-              onChange={setTab}
-              ariaLabel="执行面板"
-              className="px-2 pt-1"
-            />
-            <div className="max-h-[260px] overflow-y-auto px-3 pb-3 rl-scroll-thin">
-              {tab === 'execution' ? (
-                traceSteps.length === 0 ? (
-                  <p className="text-[11px] text-text-dim">本节没有执行模拟数据。</p>
-                ) : (
-                  <ol className="space-y-1.5">
-                    {traceSteps.map((item, index) => (
-                      <li key={`${item.index}-${item.title}`}>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const matching = timeline.steps.findIndex((s) => s.title === item.title);
-                            if (matching >= 0) seekGlobal(timeline.offsets[matching] ?? 0);
-                          }}
-                          className={cn(
-                            'flex w-full items-center gap-1.5 rounded-[var(--radius-sm)] px-1.5 py-1 text-left text-[11px]',
-                            index === stepIndex ? 'bg-accent-soft text-accent' : 'text-text-muted hover:bg-surface-2',
-                          )}
-                        >
-                          <span className="grid size-4 shrink-0 place-items-center rounded-full border border-current text-[9px]">
-                            {index + 1}
-                          </span>
-                          <span className="min-w-0 flex-1 truncate">{item.title}</span>
-                          <CertaintyBadge certainty={item.certainty} />
-                        </button>
-                      </li>
-                    ))}
-                  </ol>
-                )
-              ) : (
-                <div className="space-y-1.5">
-                  {(traceStep?.variables ?? []).length === 0 ? (
-                    <p className="text-[11px] text-text-dim">当前步骤没有可见变量。</p>
-                  ) : (
-                    (traceStep?.variables ?? []).map((variable, index) => (
-                      <div key={index} className="rounded-[var(--radius-sm)] border border-border bg-code-bg px-2 py-1">
-                        <div className="flex items-baseline gap-2">
-                          <span className="font-mono text-[10px] text-accent">{String(variable.name ?? '')}</span>
-                          <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-text">
-                            {String(variable.value ?? '')}
-                          </span>
-                        </div>
-                        {typeof variable.note === 'string' ? (
-                          <p className="mt-0.5 text-[10px] text-warn">{variable.note}</p>
-                        ) : null}
-                      </div>
-                    ))
-                  )}
-                </div>
-              )}
-            </div>
-          </Card>
-
-          {codeNotes.filter((note) => note.file === activeFile).length > 0 ? (
-            <Card className="space-y-1.5">
-              <h3 className="flex items-center gap-1.5 text-xs font-semibold text-text">
-                <Braces className="size-3.5 text-accent" aria-hidden />
-                本文件代码注释
-              </h3>
-              <ul className="max-h-40 space-y-1 overflow-y-auto rl-scroll-thin">
-                {codeNotes
-                  .filter((note) => note.file === activeFile)
-                  .map((note) => (
-                    <li key={`${note.line}-${note.text}`}>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          openAnchor({ file: note.file, lineStart: note.line, lineEnd: note.line })
-                        }
-                        className="flex w-full gap-2 rounded-[var(--radius-sm)] px-1.5 py-1 text-left hover:bg-surface-2"
-                      >
-                        <span className="shrink-0 font-mono text-[10px] text-accent">L{note.line}</span>
-                        <span className="min-w-0 flex-1 text-[11px] leading-[1.55] text-text-muted">
-                          {note.text}
-                        </span>
-                      </button>
-                    </li>
-                  ))}
-              </ul>
-            </Card>
-          ) : null}
-
-          {askOpen && askSelection ? (
-            <InlineAsk
-              courseId={courseId}
-              selection={askSelection}
-              layer="deep_dive"
-              lessonKey={lessonKey}
-              initialAction={pendingAction}
-              onJumpEvidence={(item) => openAnchor(evidenceToAnchor(item))}
-              onClose={() => {
-                setAskOpen(false);
-                setPendingAction(null);
-              }}
-            />
-          ) : (
-            <Card className="space-y-1.5">
-              <h3 className="flex items-center gap-1.5 text-xs font-semibold text-text">
-                <Terminal className="size-3.5 text-accent" aria-hidden />
-                怎么提问
-              </h3>
-              <p className="text-[11px] leading-[1.65] text-text-muted">
-                在左侧代码里选中任意几行 → 出现浮动工具条（解释这行 / 为什么这样实现 / 有什么替代方案）→
-                答案会带证据列表，点一下跳回 file:line。
-              </p>
-            </Card>
-          )}
+      {wide ? (
+        // ≥xl：维持现状双栏（代码 + 执行/注释/提问竖排）。
+        // 这里**不**渲染 `PaneSwitcher` —— 多一份 `role="tab"` 会让既有 e2e 的
+        // `getByRole('tab')` 命中歧义（spec §3.3.2 的实现要点）。
+        <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[minmax(0,1fr)_minmax(320px,380px)]">
+          {codePane}
+          <div className="space-y-3">
+            {executionCard}
+            {notesCard}
+            {askCard}
+          </div>
         </div>
-      </div>
+      ) : (
+        // <xl：三段切换（代码 / 执行 / 提问），Tabs 固定在工作区顶部
+        <PaneSwitcher
+          value={pane}
+          onChange={changePane}
+          code={codePane}
+          execution={
+            <div className="space-y-3">
+              {executionCard}
+              {notesCard}
+            </div>
+          }
+          ask={askCard}
+          className="min-h-0 flex-1"
+        />
+      )}
 
       <PredictionQuiz
         courseId={courseId}

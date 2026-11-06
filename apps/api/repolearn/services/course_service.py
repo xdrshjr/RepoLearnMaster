@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import hashlib
+import sqlite3
 from typing import Any
 
 from sqlalchemy import Select, func, or_, select
@@ -30,6 +31,7 @@ from repolearn.schemas.course import (
     CourseCreatedResponse,
     CourseDetail,
     CourseListItem,
+    CourseListResponse,
     QualityBrief,
     RepoBrief,
     SectionBrief,
@@ -55,7 +57,7 @@ def cache_key_for(full_name: str, commit_sha: str, policy_version: str, language
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def to_list_item(course: CourseVersion, repo: Repository) -> CourseListItem:
+def to_list_item(course: CourseVersion, repo: Repository, *, highlights: Any = None) -> CourseListItem:
     quality = dict(course.quality_report or {})
     return CourseListItem(
         id=course.id,
@@ -83,6 +85,7 @@ def to_list_item(course: CourseVersion, repo: Repository) -> CourseListItem:
         ),
         updated_at=(course.updated_at or course.created_at).isoformat() if (course.updated_at or course.created_at) else None,
         cover_palette=course.cover_palette,
+        highlights=highlights,
     )
 
 
@@ -94,9 +97,98 @@ async def list_courses(
     q: str | None = None,
     limit: int | None = None,
     cursor: str | None = None,
-) -> tuple[list[CourseListItem], str | None]:
+    mode: str = "auto",
+    offset: int = 0,
+) -> CourseListResponse:
+    """课程列表（scan / fts 双通道，hardening spec §3.4.3 / §3.4.4）。
+
+    两条纪律：
+    1. **生效模式必须回显**。`mode` 返回的是"这次真的用了哪条路"，不是配置值。
+       旧实现答应 `REPOLEARN_SEARCH=fts` 却只有 `LIKE` 分支，而 Doctor 报 ok——
+       一个骗过所有人的开关。回显是让这种谎言不可能再出现的唯一办法。
+    2. **fts 与 scan 的分页语义不同且不可混用**：fts 用 `offset`（上限 200，
+       `bm25` 是浮点分数，做 keyset 会在索引变化后产生幽灵行），scan 用 keyset
+       游标。混着传由路由层直接 `VALIDATION_FAILED`，不在这里猜。
+    """
+    from repolearn.services.search import (
+        MAX_OFFSET,
+        SearchPlan,
+        fts_capability,
+        highlight_segments,
+        plan_search,
+    )
+    from repolearn.services.search_ddl import FTSTable
+
     size = clamp_limit(limit)
-    stmt: Select = (
+    configured = settings.search if mode == "auto" else mode
+    plan = plan_search(q, configured=configured, sqlite_version=sqlite3.sqlite_version)
+
+    # 配置说 fts、但库里根本没有索引表（老 SQLite 上迁移跳过了建表）时，
+    # 计划里只体现了版本判据；这里补一次**实际状态**探测，避免 `no such table`。
+    if plan.mode == "fts":
+        cap = await fts_capability(session)
+        if not cap.available:
+            plan = plan_search(q, configured="scan", sqlite_version=sqlite3.sqlite_version)
+            plan = SearchPlan(
+                mode="scan",
+                tokens=plan.tokens,
+                like_pattern=plan.like_pattern,
+                fallback_reason=cap.reason,
+            )
+
+    # `offset` 与生效模式必须匹配（spec §5.1.1）。判在这里而不是路由层，是因为
+    # "生效模式"要等 `plan_search` 按运行时能力与查询长度算完才知道：
+    # 按参数值猜会让 `mode=auto` 在装得上 fts 的机器上可用、装不上的机器上 422，
+    # 而前端 `useCourseSearch` 发的正是 `mode=auto`。
+    if offset and plan.mode != "fts":
+        raise AppError(
+            "VALIDATION_FAILED",
+            "offset 只用于 fts 模式",
+            hint="本次请求实际走 scan（查询过短或本机没有 trigram 索引）；fts 用 offset（0–200）分页，scan 请用 cursor",
+            details={"mode": plan.mode, "offset": offset, "fallback_reason": plan.fallback_reason},
+        )
+
+    if plan.mode == "none":
+        stmt: Select = (
+            select(CourseVersion, Repository)
+            .join(Repository, Repository.id == CourseVersion.repository_id)
+            .where(not_deleted())
+        )
+        if status:
+            stmt = stmt.where(CourseVersion.status == status)
+        if owner:
+            stmt = stmt.where(Repository.owner == owner)
+        decoded = decode_cursor(cursor)
+        if decoded is not None:
+            ts, row_id = decoded
+            stmt = stmt.where(
+                or_(
+                    CourseVersion.created_at < ts,
+                    (CourseVersion.created_at == ts) & (CourseVersion.id < row_id),
+                )
+            )
+        stmt = stmt.order_by(CourseVersion.created_at.desc(), CourseVersion.id.desc()).limit(size + 1)
+        rows = (await session.execute(stmt)).all()
+        has_more = len(rows) > size
+        rows = rows[:size]
+        items = [to_list_item(course, repo) for course, repo in rows]
+        next_cursor = encode_cursor(rows[-1][0].created_at, rows[-1][0].id) if has_more and rows else None
+        return CourseListResponse(items=items, next_cursor=next_cursor, mode="none")
+
+    if plan.mode == "fts":
+        return await _list_courses_fts(
+            session,
+            plan=plan,
+            status=status,
+            owner=owner,
+            size=size,
+            offset=min(max(offset, 0), MAX_OFFSET),
+            highlight_segments=highlight_segments,
+            table=FTSTable,
+        )
+
+    # scan：既有 LIKE 分支（保持 v1 语义不变，including 排序与游标）
+    stmt = (
         select(CourseVersion, Repository)
         .join(Repository, Repository.id == CourseVersion.repository_id)
         .where(not_deleted())
@@ -105,14 +197,21 @@ async def list_courses(
         stmt = stmt.where(CourseVersion.status == status)
     if owner:
         stmt = stmt.where(Repository.owner == owner)
-    if q:
+    if plan.like_pattern:
         # 搜索不在 EXPLAIN 门禁内（§8.2 P1-9）：前缀通配符下任何 B 树索引都不生效。
         # 因此这里显式限流 limit ≤ 50，并在文档里写明"scan 模式"。
-        like = f"%{q.lower()}%"
+        # `summary_md` 只匹配**前 512 字**，与 FTS 索引的可搜边界保持一致
+        # （`search_ddl.SUMMARY_INDEX_CHARS`）。不截断的话，关键词只出现在 512 字
+        # 之后的课程会"scan 能搜到、fts 搜不到且 fallback_reason 为空"——正是本轮
+        # 要消灭的"库里有、用户搜不到"，也是 T-E2E-R4 的 parity 断言在真实数据上
+        # 必然踩到的一处不一致。
+        from repolearn.services.search_ddl import SUMMARY_INDEX_CHARS
+
+        like = plan.like_pattern
         stmt = stmt.where(
             or_(
                 func.lower(CourseVersion.title).like(like),
-                func.lower(CourseVersion.summary_md).like(like),
+                func.lower(func.substr(CourseVersion.summary_md, 1, SUMMARY_INDEX_CHARS)).like(like),
                 func.lower(Repository.full_name).like(like),
             )
         )
@@ -129,9 +228,131 @@ async def list_courses(
     rows = (await session.execute(stmt)).all()
     has_more = len(rows) > size
     rows = rows[:size]
-    items = [to_list_item(course, repo) for course, repo in rows]
+    items = [
+        to_list_item(
+            course,
+            repo,
+            highlights=_highlights(plan.tokens, course, repo, highlight_segments),
+        )
+        for course, repo in rows
+    ]
     next_cursor = encode_cursor(rows[-1][0].created_at, rows[-1][0].id) if has_more and rows else None
-    return items, next_cursor
+    return CourseListResponse(
+        items=items,
+        next_cursor=next_cursor,
+        mode="scan",
+        fallback_reason=plan.fallback_reason,
+    )
+
+
+async def _list_courses_fts(
+    session,
+    *,
+    plan,
+    status: str | None,
+    owner: str | None,
+    size: int,
+    offset: int,
+    highlight_segments,
+    table: str,
+) -> CourseListResponse:
+    """fts 分支：`MATCH` + `bm25` 排序 + offset 分页。
+
+    三条实测结论写在这里，因为它们是**语法约束**而不是风格选择（spec 评审 E3）：
+    * `MATCH` 与 `bm25()` 的参数只能写表名，写别名会 `no such column: s`；
+    * `bm25()` 返回负数，升序即"最相关在前"；
+    * 排序必须带 `created_at DESC, id DESC` 兜底，否则同分文档的顺序不稳定，
+      同一页翻两次会看到不同的顺序。
+    """
+    from sqlalchemy import text as sql_text
+
+    filters = ["course_search MATCH :expr", "c.deleted_at IS NULL"]
+    params: dict[str, Any] = {
+        "expr": plan.fts_expression or "",
+        "limit": size + 1,
+        "offset": offset,
+    }
+    if status:
+        filters.append("c.status = :status")
+        params["status"] = status
+    if owner:
+        filters.append("r.owner = :owner")
+        params["owner"] = owner
+    where = " AND ".join(filters)
+    id_sql = sql_text(
+        f"""
+        SELECT c.id
+        FROM {table} s
+        JOIN course_versions c ON c.id = s.course_version_id
+        JOIN repositories r ON r.id = c.repository_id
+        WHERE {where}
+        ORDER BY bm25({table}), c.created_at DESC, c.id DESC
+        LIMIT :limit OFFSET :offset
+        """
+    )
+    ids = [row[0] for row in (await session.execute(id_sql, params)).all()]
+    has_more = len(ids) > size
+    ids = ids[:size]
+    total_sql = sql_text(
+        f"""
+        SELECT count(*)
+        FROM {table} s
+        JOIN course_versions c ON c.id = s.course_version_id
+        JOIN repositories r ON r.id = c.repository_id
+        WHERE {where}
+        """
+    )
+    total_params = {k: v for k, v in params.items() if k not in {"limit", "offset"}}
+    total = int((await session.execute(total_sql, total_params)).scalar() or 0)
+
+    if not ids:
+        return CourseListResponse(items=[], mode="fts", next_offset=None, total=total)
+
+    rows = (
+        await session.execute(
+            select(CourseVersion, Repository)
+            .join(Repository, Repository.id == CourseVersion.repository_id)
+            .where(CourseVersion.id.in_(ids))
+        )
+    ).all()
+    by_id = {course.id: (course, repo) for course, repo in rows}
+    items = []
+    for course_id in ids:  # 保持 bm25 的顺序，不能按 DB 返回顺序
+        pair = by_id.get(course_id)
+        if pair is None:
+            continue
+        course, repo = pair
+        items.append(
+            to_list_item(course, repo, highlights=_highlights(plan.tokens, course, repo, highlight_segments))
+        )
+    next_offset = offset + size if has_more else None
+    return CourseListResponse(items=items, mode="fts", next_offset=next_offset, total=total)
+
+
+def _highlights(tokens, course, repo, highlight_segments):
+    """为一条课程生成三段高亮。没命中就返回 `None` 而不是空列表。
+
+    空列表会让前端把整行渲染成空白（"有结果但看起来是空的"），而 `None` 的语义
+    是"这里没有高亮"，前端据此回退到普通文本。
+    """
+    if not tokens:
+        return None
+    title = [s for s in highlight_segments(course.title or "", tokens)]
+    summary = [s for s in highlight_segments((course.summary_md or "")[:512], tokens)]
+    repo_name = [s for s in highlight_segments(repo.full_name or "", tokens)]
+    if not any(any(seg.marked for seg in group) for group in (title, summary, repo_name)):
+        return None
+    from repolearn.schemas.course import HighlightGroup, HighlightSegment
+
+    def to_model(group):
+        marked = any(seg.marked for seg in group)
+        return [HighlightSegment(text=seg.text, marked=seg.marked) for seg in group] if marked else None
+
+    return HighlightGroup(
+        title=to_model(title),
+        summary=to_model(summary),
+        repo=to_model(repo_name),
+    )
 
 
 async def get_course(session, course_id: str, *, require_ready: bool = False) -> tuple[CourseVersion, Repository]:

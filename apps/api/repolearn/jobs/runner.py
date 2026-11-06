@@ -198,6 +198,26 @@ class JobRunner:
             if claimed.kind == "book":
                 return await run_book_job(job_id=claimed.id, payload=claimed.payload, emit=emit)
             return await run_pdf_job(job_id=claimed.id, payload=claimed.payload, emit=emit)
+        if claimed.kind == "upgrade":
+            from repolearn.jobs.upgrade_jobs import run_upgrade_job
+
+            if not claimed.course_version_id:
+                raise AppError("INTERNAL", "升级任务缺少 course_id")
+            return await run_upgrade_job(
+                job_id=claimed.id,
+                course_id=claimed.course_version_id,
+                payload=claimed.payload,
+                emit=emit,
+            )
+        if claimed.kind == "upgrade-plan":
+            from repolearn.jobs.upgrade_jobs import run_upgrade_plan_job
+
+            return await run_upgrade_plan_job(
+                job_id=claimed.id,
+                course_id=claimed.course_version_id,
+                payload=claimed.payload,
+                emit=emit,
+            )
         raise AppError("INTERNAL", f"未知任务类型：{claimed.kind}")
 
     async def _heartbeat_loop(self, job_id: str) -> None:

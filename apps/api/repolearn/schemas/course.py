@@ -62,6 +62,21 @@ class QualityBrief(BaseModel):
     anchor_confidence: str = "high"
 
 
+class HighlightSegment(BaseModel):
+    """高亮片段。`marked=True` 的片段由前端渲染成 `<mark>`（**服务端不返回 HTML**）。"""
+
+    text: str
+    marked: bool = False
+
+
+class HighlightGroup(BaseModel):
+    """一条课程在三个可搜索字段上的高亮（未命中/未搜索时为 `None`）。"""
+
+    title: list[HighlightSegment] | None = None
+    summary: list[HighlightSegment] | None = None
+    repo: list[HighlightSegment] | None = None
+
+
 class CourseListItem(BaseModel):
     id: str
     repo: RepoBrief
@@ -73,11 +88,24 @@ class CourseListItem(BaseModel):
     quality: QualityBrief = Field(default_factory=QualityBrief)
     updated_at: str | None = None
     cover_palette: str = "mint"
+    #: 搜索高亮。未搜索时为 `None`（老前端不受影响：加的是有默认值的新字段）。
+    highlights: HighlightGroup | None = None
 
 
 class CourseListResponse(BaseModel):
     items: list[CourseListItem] = Field(default_factory=list)
+    #: keyset 游标（scan 模式）。fts 模式恒为 `None`——bm25 是浮点分数，
+    #: 把浮点编进游标会在索引变化后产生幽灵重复行（spec §10 第 2 条）。
     next_cursor: str | None = None
+    #: **实际生效**模式（不是配置值）。G3 的本质是"系统说了谎"，回显实际
+    #: 生效模式是让撒谎变得不可能的唯一办法。
+    mode: str = "none"
+    #: `query_too_short` / `sqlite_too_old` / None
+    fallback_reason: str | None = None
+    #: fts 模式的下一页偏移；其他模式为 `None`。
+    next_offset: int | None = None
+    #: fts 模式的 `COUNT(*)`；scan 为 `None`（scan 不额外数一遍）。
+    total: int | None = None
 
 
 class SectionBrief(BaseModel):
@@ -112,6 +140,43 @@ class RebuildRequest(BaseModel):
     from_stage: str | None = Field(default=None, alias="from", max_length=20)
 
     model_config = {"populate_by_name": True}
+
+
+class UpgradeRequest(BaseModel):
+    """`POST /v1/courses/{id}/upgrade`。
+
+    `dry_run=True` 只算不改：返回受影响课时清单供 UI 抽屉展示，**不写库**。
+    注意它并不免费——走到那一步已经下载并解包了整包 tarball，因此服务端还有
+    三道闸（体积上限 / 计划缓存 / 20s 预算，spec §3.5.2）。
+    """
+
+    ref: str | None = Field(default=None, max_length=120)
+    dry_run: bool = False
+
+
+class AffectedLesson(BaseModel):
+    key: str
+    title: str = ""
+
+
+class UpgradePlanResponse(BaseModel):
+    """200：计划（dry_run 或 `mode in {none, reused}`）。"""
+
+    mode: str
+    reasons: list[str] = Field(default_factory=list)
+    stats: dict[str, int] = Field(default_factory=dict)
+    affected_lessons: list[AffectedLesson] = Field(default_factory=list)
+    course_id: str
+    from_sha: str = ""
+    to_sha: str = ""
+
+
+class UpgradeStartedResponse(BaseModel):
+    """202：真的开始生成新版本。旧版本全程保持可读（与 `/rebuild` 的关键区别）。"""
+
+    job_id: str
+    course_id: str
+    mode: str
 
 
 class AnchorItem(BaseModel):

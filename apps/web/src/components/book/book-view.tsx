@@ -92,7 +92,7 @@ export function BookView({ bookId }: { bookId: string }) {
       />
       <div className="flex min-h-[calc(100dvh-48px)] flex-col">
         <div className="flex min-h-0 flex-1">
-          <aside className="hidden w-[240px] shrink-0 border-r border-border bg-bg-elevated md:block">
+          <aside className="hidden w-[240px] shrink-0 border-r border-border bg-bg-elevated lg:block">
             <ChapterNav book={book.data} activeKey={activeKey} onSelect={setChapterKey} />
           </aside>
 
@@ -104,7 +104,14 @@ export function BookView({ bookId }: { bookId: string }) {
                 <Skeleton className="h-40" />
               </div>
             ) : (
-              <BookReader chapter={chapter.data} loading={chapter.isLoading} courseId={courseId} />
+              <BookReader
+                chapter={chapter.data}
+                loading={chapter.isLoading}
+                courseId={courseId}
+                book={book.data}
+                activeKey={activeKey}
+                onSelectChapter={setChapterKey}
+              />
             )}
           </main>
 

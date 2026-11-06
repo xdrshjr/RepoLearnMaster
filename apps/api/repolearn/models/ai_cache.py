@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-
 from sqlalchemy import Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from repolearn.core.db import Base
-from repolearn.models._types import ID, JsonCol, OptTs, Ts
+from repolearn.models._types import JsonCol, OptTs, Ts
 
 
 class AiCache(Base):

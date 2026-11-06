@@ -1,0 +1,36 @@
+{
+  "commit": {
+    "author": {
+      "date": "2026-03-01T00:00:00Z"
+    },
+    "message": "feat(tiny): add router, drop bus"
+  },
+  "files": [
+    {
+      "additions": 24,
+      "changes": 44,
+      "deletions": 20,
+      "filename": "tiny/agent.py",
+      "patch": "@@ -1,20 +1,24 @@\n+\"\"\"TinyAgent：消息的发出方。\n+\n+v2 把传输层从 `MessageBus` 换成了 `Router`：构造签名与 `send()` 都没动，变的只是\n",
+      "status": "modified"
+    },
+    {
+      "additions": 0,
+      "changes": 15,
+      "deletions": 15,
+      "filename": "tiny/bus.py",
+      "patch": "@@ -1,15 +0,0 @@\n-\"\"\"进程内消息总线：只保留「谁说了什么」的追加日志。\n-\n-刻意不用队列与线程：夹具里的代码要能被静态分析一眼读完，任何异步细节都会让\n",
+      "status": "removed"
+    },
+    {
+      "additions": 23,
+      "changes": 23,
+      "deletions": 0,
+      "filename": "tiny/router.py",
+      "patch": "@@ -0,0 +1,23 @@\n+\"\"\"Router：v2 新增的传输层，按发送者登记的处理函数做一次转发。\n+\n+它自己保留 `log`，因此不再需要 `tiny/bus.py`：一个只有四个文件的小仓库里，\n",
+      "status": "added"
+    }
+  ],
+  "html_url": "https://github.com/microsoft/autogen/commit/2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c",
+  "sha": "2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c"
+}

@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from sqlalchemy import JSON, DateTime, String, Text, TypeDecorator
@@ -44,14 +44,14 @@ class UtcDateTime(TypeDecorator):
             return None
         if value.tzinfo is None:
             return value
-        return value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.astimezone(UTC).replace(tzinfo=None)
 
     def process_result_value(self, value: datetime | None, dialect: Any) -> datetime | None:  # noqa: ANN401
         if value is None:
             return None
         if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
 
 # 前缀 ID（ULID）长度为 4（prefix+_）+ 26 = 30；留到 40 以容纳未来格式。

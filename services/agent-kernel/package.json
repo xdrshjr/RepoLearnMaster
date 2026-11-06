@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
   "description": "RepoLearn Agent Kernel — 包裹 @aragon-agent/core 的内部 sidecar",
   "main": "dist/server.js",
   "scripts": {

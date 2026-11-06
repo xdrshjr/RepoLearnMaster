@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from repolearn.core.db import Base
-from repolearn.core.errors import ERRORS, ERROR_CODE_COUNT, AppError
+from repolearn.core.errors import ERROR_CODE_COUNT, ERRORS, AppError, strict_code_env
 from repolearn.models import ALL_MODELS, SPEC_TABLE_COUNT, missing_tables, table_names
 
 
@@ -23,9 +23,27 @@ def test_model_files_one_per_table():
     assert len(set(names)) == len(names)
 
 
-def test_error_code_count_is_19():
-    """§5.6 定稿 19 个错误码；§8.1 的门禁表述依赖这个数字。"""
-    assert len(ERRORS) == ERROR_CODE_COUNT == 19
+def test_error_code_count_is_20():
+    """§5.6 定稿 20 个错误码（v2 加了 `VALIDATION_FAILED`，见 hardening spec P0-4）。
+    §8.1 的门禁表述依赖这个数字：改码表就必须改这里。"""
+    assert len(ERRORS) == ERROR_CODE_COUNT == 20
+
+
+def test_validation_failed_code_shape():
+    """P0-4 的落点：这个码必须真的存在，且是 422 + 不可重试。
+
+    它以前根本不存在，而 `AppError` 对未知码静默降级成 `INTERNAL(500, 可重试)`，
+    于是"offset 填成 999"会被说成"服务内部错误，请重试"——一个确定性的参数
+    错误被伪装成可恢复的服务故障，用户会一直点重试。
+    """
+    spec = ERRORS["VALIDATION_FAILED"]
+    assert spec.http == 422
+    assert spec.retryable is False
+    assert spec.hint and "offset" in spec.hint
+    err = AppError("VALIDATION_FAILED", details={"offset": 999})
+    assert err.code == "VALIDATION_FAILED"
+    assert err.status == 422
+    assert err.retryable is False
 
 
 def test_every_error_code_has_message_and_http():
@@ -46,10 +64,30 @@ def test_app_error_body_shape():
     assert error["hint"]
 
 
-def test_unknown_code_falls_back_to_internal():
+def test_unknown_code_asserts_in_test_env():
+    """未知码在 `test`/`dev`/`development` 下必须**当场断言**，不许静默变 500。
+
+    这条断言本身就是"码表是定稿"这件事的门禁：任何一处 `AppError("TYPO")`
+    都会在第一个跑到它的用例里炸，而不是在生产上变成可重试的 500。
+    """
+    import pytest
+
+    from repolearn.core.config import settings
+
+    assert strict_code_env() is True, f"REPOLEARN_ENV={settings.env!r} 不是严格环境"
+    with pytest.raises(AssertionError, match="未知错误码"):
+        AppError("NOPE_NOT_A_CODE")
+
+
+def test_unknown_code_still_degrades_outside_strict_env(monkeypatch):
+    """生产环境仍然降级为 `INTERNAL`：线上宁可丢语义，也不要丢整个响应。"""
+    from repolearn.core import errors as errors_mod
+
+    monkeypatch.setattr(errors_mod, "strict_code_env", lambda: False)
     err = AppError("NOPE_NOT_A_CODE")
     assert err.code == "INTERNAL"
     assert err.status == 500
+    assert err.retryable is True
 
 
 def test_retryable_defaults_by_status():
@@ -59,9 +97,9 @@ def test_retryable_defaults_by_status():
 
 def test_partial_unique_index_exists():
     """`llm_profiles.active` 的部分唯一索引必须真的建出来了（T-DB-3 的前提）。"""
-    from sqlalchemy import text
-
     import asyncio
+
+    from sqlalchemy import text
 
     from repolearn.core.db import engine
 

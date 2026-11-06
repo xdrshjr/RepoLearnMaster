@@ -1,14 +1,15 @@
 'use client';
 
 import Link from 'next/link';
-import { Copy, ExternalLink, Minus, Plus, Sun } from 'lucide-react';
+import { Copy, ExternalLink, List, Minus, Plus, Sun } from 'lucide-react';
 import { useState } from 'react';
 
 import { Badge, Card, Skeleton } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Markdown } from '@/components/ui/markdown';
 import { useToast } from '@/components/ui/toast';
-import type { BookBlock, BookChapterDetail } from '@/lib/api/types';
+import { ChapterNavSheet } from '@/components/book/chapter-nav';
+import type { BookBlock, BookChapterDetail, BookDetail } from '@/lib/api/types';
 import { readString, toEvidence, type EvidenceView } from '@/lib/api/types';
 import { safeLocalStorageGet, safeLocalStorageSet, cn } from '@/lib/utils';
 
@@ -77,7 +78,12 @@ function CodeBlock({
           </Button>
         </span>
       </div>
-      <pre className="overflow-x-auto bg-code-bg p-3 font-mono text-[12px] leading-[1.55] text-text">
+      {/*
+        §3.3.2 D31：代码块是本页最宽的固定宽度内容（长行必然超出 390px）。
+        `rl-scroll-x` = `overflow-x: auto` + `-webkit-overflow-scrolling: touch`，
+        让横向滚动发生在**代码块内部**，而不是把整篇文章推成横向滚动条。
+      */}
+      <pre className="rl-scroll-x bg-code-bg p-3 font-mono text-[12px] leading-[1.55] text-text">
         {block.text}
       </pre>
       {block.caption ? <p className="border-t border-border px-2 py-1 text-[10px] text-text-dim">{block.caption}</p> : null}
@@ -89,12 +95,24 @@ export function BookReader({
   chapter,
   loading,
   courseId,
+  book,
+  activeKey,
+  onSelectChapter,
 }: {
   chapter: BookChapterDetail | undefined;
   loading: boolean;
   courseId: string | null;
+  /**
+   * 目录抽屉的数据。书籍页的 `<aside>` 在 `<lg` 时不可见，目录必须另有一个
+   * 等价入口（§3.3.1 “唯一允许的隐藏形态”）。这三个属性由 `BookView` 传入；
+   * 不传时正文照常渲染，只是不出现「目录」触发器。
+   */
+  book?: BookDetail;
+  activeKey?: string | null;
+  onSelectChapter?: (key: string) => void;
 }) {
   const { fontSize, updateFontSize, theme, toggleTheme } = useBookPreferences();
+  const [navOpen, setNavOpen] = useState(false);
 
   if (loading && !chapter) {
     return (
@@ -115,14 +133,36 @@ export function BookReader({
     .map(toEvidence)
     .filter((value): value is EvidenceView => Boolean(value));
 
+  const navEnabled = Boolean(book && onSelectChapter);
+
   return (
     <article
       className={cn(
-        'mx-auto w-full max-w-[760px] px-5 py-6',
+        // 单栏正文：`min(92vw, 68ch)` 同时约束"手机左右留白"与"桌面行长"，
+        // 64ch 以上的行长会让阅读回落（§3.3.2 D31）。
+        'mx-auto w-full max-w-[min(92vw,68ch)] px-4 py-6 sm:px-5',
         theme === 'sepia' ? 'bg-[#1a1710]' : 'bg-transparent',
       )}
       style={{ fontSize: `${fontSize}px` }}
     >
+      {navEnabled ? (
+        <div className="mb-3 flex items-center gap-2 lg:hidden">
+          <Button
+            variant="outline"
+            size="sm"
+            data-rl-tap=""
+            aria-label="打开目录"
+            aria-expanded={navOpen}
+            className="shrink-0 px-3 max-lg:min-h-[var(--tap-target)]"
+            icon={<List className="size-3.5" aria-hidden />}
+            onClick={() => setNavOpen(true)}
+          >
+            目录
+          </Button>
+          <span className="min-w-0 flex-1 truncate text-[11px] text-text-dim">{chapter.title}</span>
+        </div>
+      ) : null}
+
       <div className="mb-4 flex flex-wrap items-center gap-2">
         <h1 className="min-w-0 flex-1 text-[22px] font-semibold leading-snug text-text">{chapter.title}</h1>
         <span className="flex items-center gap-1">
@@ -156,7 +196,10 @@ export function BookReader({
         }
         if (block.type === 'table') {
           return (
-            <pre key={index} className="my-3 overflow-x-auto rounded-[var(--radius-sm)] border border-border bg-code-bg p-2 font-mono text-[11px] text-text-muted">
+            <pre
+              key={index}
+              className="rl-scroll-x my-3 rounded-[var(--radius-sm)] border border-border bg-code-bg p-2 font-mono text-[11px] text-text-muted"
+            >
               {block.text}
             </pre>
           );
@@ -191,6 +234,16 @@ export function BookReader({
             ))}
           </ul>
         </Card>
+      ) : null}
+
+      {book && onSelectChapter ? (
+        <ChapterNavSheet
+          open={navOpen}
+          onClose={() => setNavOpen(false)}
+          book={book}
+          activeKey={activeKey ?? null}
+          onSelect={onSelectChapter}
+        />
       ) : null}
     </article>
   );

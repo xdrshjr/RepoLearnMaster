@@ -31,7 +31,7 @@ export function SiteHeader({ context, right, className, sticky = true }: SiteHea
         className,
       )}
     >
-      <Link href="/" className="flex items-center" aria-label="RepoLearn 首页">
+      <Link href="/" className="flex items-center">
         <Logo />
       </Link>
       <div className="min-w-0 flex-1 truncate text-xs text-text-dim">{context}</div>

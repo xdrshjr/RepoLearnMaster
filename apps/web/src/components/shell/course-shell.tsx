@@ -164,14 +164,15 @@ export function CourseShell({ courseId, children }: { courseId: string; children
       <PlayerProvider courseId={courseId}>
         <div className="flex h-dvh flex-col overflow-hidden bg-bg">
           <header className="flex shrink-0 items-center gap-3 border-b border-border bg-bg px-3 py-2">
-            <Link href="/" aria-label="回首页" className="shrink-0">
+            <Link href="/" className="shrink-0">
               <Logo />
             </Link>
             <Button
               variant="ghost"
               size="sm"
-              className="lg:hidden"
+              className="lg:hidden max-lg:min-h-[var(--tap-target)] max-lg:min-w-[var(--tap-target)]"
               aria-label="打开大纲"
+              data-rl-tap=""
               onClick={() => setOutlineOpen(true)}
             >
               <Menu className="size-4" aria-hidden />
@@ -213,8 +214,9 @@ export function CourseShell({ courseId, children }: { courseId: string; children
             <Button
               variant="ghost"
               size="sm"
-              className="xl:hidden"
+              className="xl:hidden max-lg:min-h-[var(--tap-target)] max-lg:min-w-[var(--tap-target)]"
               aria-label="打开 Momo"
+              data-rl-tap=""
               onClick={() => setMentorOpen(true)}
             >
               <PanelRight className="size-4" aria-hidden />

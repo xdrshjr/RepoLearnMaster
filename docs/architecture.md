@@ -99,3 +99,69 @@ N1 normalize_repo → N2 resolve_commit → N3 fetch_repo → N4 analyze_repo
 - 结构化 JSON 日志（`req_id` / `job_id` / `node` / `duration_ms`），请求体永不入日志；
 - `/v1/metrics` 聚合：成功率、P50/P95、缓存命中率、token/USD、完成率、正确率、导出率；
 - Doctor 面板：DB / Kernel / Chromium / tree-sitter / 模型配置 / TTS / GitHub / 搜索模式。
+
+---
+
+## 9. 搜索：trigram + 短查询回落
+
+索引是一张 FTS5 虚拟表 `course_search`（`tokenize='trigram'`，`summary` 只索引前 512 字），
+由 4 个触发器维护：`course_versions` 的 insert/update(title,summary_md)/delete，
+以及 `repositories` 的 update(full_name)。
+
+三条**实测**事实决定了它的形状（不是风格选择）：
+
+1. trigram 的匹配单位是 3 字符：2 字查询 `MATCH` 返回 **0 行且不报错**。2 字中文是
+   最高频形态，因此 `plan_search()` 按长度分流，并把结论（`mode` / `fallback_reason`）
+   回显给前端与 Doctor。
+2. `MATCH` 是表达式语言（`-` 是 NOT、`*` 是前缀、`NEAR()` 是邻接），所以每个 token
+   都加双引号并把内部引号双写，一切退化成语面量。
+3. `MATCH` 与 `bm25()` 的参数**只能写表名**，写别名会 `no such column`。
+
+DDL 只有一份（`services/search_ddl.py`），由迁移 `0002`、迁移 `0003` 的 downgrade、
+`cli reindex-search` 三处共用。原因：`migrations/env.py` 全局开了 `render_as_batch=True`，
+而 SQLite 的 batch 语义是**重建表**——重建会 DROP 原表，触发器不跟着走。后果不是
+"迁移失败"，而是**迁移绿、健康检查绿、搜索悄悄不再更新**。因此 `0003` 的 upgrade 走
+原生 `ADD COLUMN`，downgrade 在重建**之前**先删触发器、重建**之后**按同一份 DDL 重放，
+并用 `T-SEARCH-9` 断言"恰好 4 个"。
+
+`plan_search()` 是纯函数（不碰 IO），因此"这次该走哪条路"可以被单测咬死；真正执行
+SQL 的是 `course_service.list_courses`。
+
+## 10. 版本升级：复制 / 重建 / 进度迁移
+
+`POST /v1/courses/{id}/upgrade` 与 `/rebuild` 是两件事：
+
+* `/rebuild`：**同一个 sha**，从某阶段起重跑本版本内容，旧内容被覆盖；
+* `/upgrade`：**新的 sha**，只重讲被改动文件涉及的课时，其余深拷贝，旧版本原样保留。
+
+判定（`analysis/diff.py::plan_upgrade`，命中即返回，顺序即语义）：
+`old_mirror_missing → full`；无受影响课时 → `none`（**不是** partial：没有课时要重讲却建
+新版本，等于凭空多一门课）；受影响 > 60% → `full`；新增文件 ≥ `max(3, ceil(total*0.1))`
+→ `full`；否则 `partial`。
+
+`total_files` 被钉死为"旧镜像中被 analysis 收录、并计入 `Commit.file_count` 的可分析
+文件数"——分母口径不定死，同一份 delta 会在开发机判 `partial`、在 CI 判 `full`，而两边
+都"有测试"。
+
+复制（`lesson_service.copy_lessons`）复制 lessons/steps/traces/quiz/anchors，**不复制**
+`user_progress`（由 `carry_forward` 按公式迁移）、`quiz_attempts`（答题历史）、`notes`
+（笔记绑定课时 id，跨版本合并会让笔记漂到别的代码行）。复制来的 `source_anchors.commit_sha`
+写**源版本**的 sha：那些行号指的是旧 commit，写新 sha 会让 UI 用新文件打开旧行号。
+
+发布（`workflow/publish.py::publish_partial`）三处与整门发布不同：质量门禁按**合并后**
+的课时集合算（否则 `min_lessons_to_publish=8` 会把 8 个课时判成 partial）；锚点校验只
+校验本次生成的课时（复制来的在 `copy_lessons` 里按旧镜像校验过）；`quality_report.upgrade`
+必须写（前端据此显示"本版本 8/12 课时沿用上一版"）。
+
+进度迁移（`progress_service.carry_forward`）两条不变式各有断言：**只降不升**、**不超过
+按新课时数重算的上限**。
+
+## 11. CI 分层（六个 job）
+
+`api`（Windows，必须——要真调 PowerShell 5.1 解析 `start.ps1`）/ `kernel`（Node 22，
+`--experimental-strip-types` 需要 ≥22.6）/ `web`（pnpm 12.18.0 显式 pin）/
+`e2e-offline`（41 条）/ `e2e-real`（三进程 + 假 GitHub，`needs: [api, web]`）/ `gates`
+（唯一 required check）。所有 job `fail-fast: false`，公共 `concurrency` 取消重复跑。
+
+**有意偏差**：`services/pdf_service.py` 不存在——PDF 由 `book_service` / `book_jobs` /
+`rendering.pdf` 三层承担（平台件实施记录已裁定，这里再记一次，避免后来者当成遗漏）。

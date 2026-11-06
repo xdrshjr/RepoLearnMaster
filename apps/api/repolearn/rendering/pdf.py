@@ -30,7 +30,16 @@ class PdfResult:
 
 
 def chromium_available() -> bool:
-    """探测 Chromium 是否可被 playwright 使用（Gate 0 G2 的运行时判断）。"""
+    """探测 Chromium 是否可被 playwright 使用（Gate 0 G2 的运行时判断）。
+
+    ⚠️ **只能在事件循环之外调用**（CLI、探测脚本、同步上下文）。Playwright 的
+    sync API 会检查当前线程有没有运行中的事件循环，有就抛
+    `It looks like you are using Playwright Sync API inside the asyncio loop`，
+    而这里把它连同 launch 失败一起 `except Exception: return False`——结果就是
+    "在 async 处理器里调用"这条路**永远返回 False**，PDF 导出于是从未真正用过
+    chromium、Doctor 也永远显示降级（这正是 spec R16 的真病因，不是"判据不同源"）。
+    async 上下文请用 `chromium_available_async`。
+    """
     try:
         from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
     except Exception:  # noqa: BLE001 - 缺包即不可用
@@ -42,6 +51,16 @@ def chromium_available() -> bool:
         return True
     except Exception:  # noqa: BLE001
         return False
+
+
+async def chromium_available_async() -> bool:
+    """`chromium_available()` 的 async 版本：丢到线程里跑。
+
+    与 `render_pdf` 用 `asyncio.to_thread` 是同一个理由——sync API 不能出现在
+    事件循环所在线程。少了这一层，"装了 Chromium 也没用"这件事不会有任何报错，
+    只会安静地降级成打印视图。
+    """
+    return await asyncio.to_thread(chromium_available)
 
 
 async def render_pdf(html: str, *, engine: str = "chromium", name: str = "book") -> PdfResult:

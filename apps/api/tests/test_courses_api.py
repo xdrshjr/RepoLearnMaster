@@ -6,7 +6,16 @@ from __future__ import annotations
 async def test_list_courses_empty(client):
     resp = await client.get("/v1/courses")
     assert resp.status_code == 200
-    assert resp.json() == {"items": [], "next_cursor": None}
+    body = resp.json()
+    # 空列表的语义：没有任何课程、生效模式是 `none`（没检索条件）、无分页信息。
+    # 这三个"空"不是一回事——`mode=none` 表示"没检索"，不是"检索了但没结果"，
+    # 前端据此决定展示热门列表还是空态文案（hardening spec §3.4.4）。
+    assert body["items"] == []
+    assert body["next_cursor"] is None
+    assert body["mode"] == "none"
+    assert body["fallback_reason"] is None
+    assert body["next_offset"] is None
+    assert body["total"] is None
 
 
 async def test_list_courses_returns_projection(client, ready_course):

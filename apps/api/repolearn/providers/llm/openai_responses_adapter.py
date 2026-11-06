@@ -14,7 +14,6 @@ from repolearn.providers.base import (
     CompletionRequest,
     CompletionResult,
     LlmConfig,
-    LlmError,
     ModelInfo,
     ProbeResult,
     Usage,
