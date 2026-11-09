@@ -183,8 +183,12 @@ export class Budget {
  */
 export const ABSOLUTE_LIMITS = {
   maxTurns: 64,
-  maxTokens: 200_000,
-  maxUsd: 10,
+  // Kernel 侧的绝对天花板。2026-11-09 从 200_000 抬到 4_000_000 是为了让
+  // Python 侧能把"一次规划就要 30k+"的现实放宽到"整门课能跑完"的量级
+  // （详见 repolearn/providers/budget_guard.py 的 NODE_BUDGETS）。它仍然是一个
+  // **硬天花板**：请求里出现更大的值一律 422，而不是被静默收敛。
+  maxTokens: 4_000_000,
+  maxUsd: 100,
   deadlineMs: 900_000,
 } as const;
 

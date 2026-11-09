@@ -22,7 +22,9 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 from repolearn.core.config import settings
@@ -39,6 +41,52 @@ _SHA_RE = re.compile(r"[0-9a-f]{40,64}")
 #: 重定向跳数上限。真实链路是 `api.github.com → codeload.github.com` 一跳；
 #: 给到 3 是给 GHE 的镜像层留余量，再往上就没有正当理由了。
 MAX_REDIRECT_HOPS = 3
+
+#: `/repos` 与 `/commits` 的进程内缓存时长（秒）。
+#:
+#: 未配置 token 时配额只有 **60 次/小时**，而一次"点生成"就要用掉 `/repos` +
+#: `/commits` 两格。用户在 UI 上连点两下、或者首页输入框触发一次 resolve 再点
+#: 生成，就会把同一份元数据取两遍——这不是"多花一点配额"，而是把本来就紧张的
+#: 60 格按倍数烧掉。60 秒足够覆盖"点开→看一眼→点生成"这个动作，又短到不会
+#: 让刚推的新 commit 长期看不见（键里还带着 ref）。
+#:
+#: 只缓存**成功**结果，且缓存的是已经过白名单清洗的 dataclass——端点返回的
+#: 原始 JSON 不会进缓存（否则"三次校验"就只对第一次请求生效）。
+CACHE_TTL_SECONDS = 60.0
+_CACHE_MAX_ENTRIES = 128
+_cache: dict[tuple[str, ...], tuple[float, object]] = {}
+
+
+def reset_github_cache() -> None:
+    """清空缓存。测试要"每次都真打端点"时用它（或把 `CACHE_TTL_SECONDS` 置 0）。"""
+    _cache.clear()
+
+
+def _cache_get(key: tuple[str, ...]):
+    entry = _cache.get(key)
+    if entry is None:
+        return None
+    expires_at, value = entry
+    if expires_at <= time.monotonic():
+        _cache.pop(key, None)
+        return None
+    log.info("github_cache_hit", key="/".join(key))
+    return value
+
+
+def _cache_put(key: tuple[str, ...], value) -> None:
+    ttl = float(CACHE_TTL_SECONDS)
+    if ttl <= 0:
+        return
+    if len(_cache) >= _CACHE_MAX_ENTRIES:
+        now = time.monotonic()
+        for stale in [k for k, (exp, _) in _cache.items() if exp <= now]:
+            _cache.pop(stale, None)
+        if len(_cache) >= _CACHE_MAX_ENTRIES:
+            # 上限是"别让它无界增长"的护栏，不是 LRU 实现：满了直接清空，
+            # 代价只是下一轮重新取一次。
+            _cache.clear()
+    _cache[key] = (time.monotonic() + ttl, value)
 
 
 def _api() -> str:
@@ -165,18 +213,156 @@ def _headers() -> dict[str, str]:
     return headers
 
 
-def _map_github_error(status: int, body: str) -> AppError:
-    if status == 404:
-        return AppError("REPO_NOT_FOUND", details={"status": status, "endpoint": _api()})
-    if status in (401, 403) and "rate limit" in body.lower():
+def _map_github_error(status: int, body: str, headers=None) -> AppError:
+    """HTTP 状态 + **响应头** → 本产品的错误码。
+
+    v1 只看 body 里有没有 "rate limit"，于是三件事都错了：
+    * 401 `Bad credentials`（token 过期/写错）被报成"无权访问该仓库"，用户去查仓库权限；
+    * 403 私有仓库与 403 限流都落在同一个 `REPO_FORBIDDEN`；
+    * 限流只说"稍后重试"，不说**还剩多少额度、几点重置**——而这两个数字就在
+      `X-RateLimit-Remaining` / `X-RateLimit-Reset` 里，不说等于让用户自己猜。
+    """
+    info = _rate_info(headers)
+    text = (body or "").lower()
+    if _looks_rate_limited(status, text, info):
         return AppError(
             "RATE_LIMITED",
             "GitHub 接口限流",
-            hint=f"在 .env 配置 REPOLEARN_GITHUB_TOKEN 可将限额提升到 5000 次/小时；端点 {_api()}；未配置 token 时为 60 次/小时",
+            hint=_rate_limit_hint(info),
+            details={"status": status, "endpoint": _api(), **_rate_details(info)},
         )
-    if status in (401, 403):
+    if status == 404:
+        return AppError("REPO_NOT_FOUND", details={"status": status, "endpoint": _api()})
+    if status == 401 or (status == 403 and any(m in text for m in _AUTH_MARKERS)):
+        return AppError(
+            "INVALID_KEY",
+            "GitHub Token 无效或已过期",
+            hint=(
+                "检查 .env 里的 REPOLEARN_GITHUB_TOKEN 是否被撤销/复制时多了空格/已过期，"
+                "改完必须重启 API；也可以先把这一行留空（未认证 60 次/小时）确认是不是 token 本身的问题"
+            ),
+            details={"status": status, "endpoint": _api()},
+        )
+    if status == 403:
         return AppError("REPO_FORBIDDEN", details={"status": status, "endpoint": _api()})
     return AppError("PROVIDER_UNAVAILABLE", f"GitHub 返回 {status}", details={"body": body[:200], "endpoint": _api()})
+
+
+# --------------------------------------------------------------------------- #
+# 限流响应头 → 一句可执行的话                                                  #
+# --------------------------------------------------------------------------- #
+
+#: GitHub 限流的两种形态：primary（配额耗尽，403 + `X-RateLimit-Remaining: 0`）
+#: 与 secondary（突发流量，429 或 403 + `Retry-After`）。两种都要能被认出来。
+_RATE_LIMIT_MARKERS = ("rate limit", "ratelimit", "abuse detection", "too many requests")
+#: token 本身有问题时 GitHub 的措辞（**不是**权限不足，别混为一谈）。
+_AUTH_MARKERS = ("bad credentials", "requires authentication", "invalid token", "unauthorized")
+
+
+@dataclass(frozen=True)
+class RateInfo:
+    limit: int | None = None
+    remaining: int | None = None
+    reset_at: datetime | None = None
+    retry_after: float | None = None
+
+
+def _int_header(headers, name: str) -> int | None:
+    try:
+        raw = headers.get(name) if headers else None
+    except Exception:  # noqa: BLE001 - 头部不可枚举不该让错误处理本身失败
+        return None
+    if raw is None or str(raw).strip() == "":
+        return None
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _rate_info(headers) -> RateInfo:
+    """从响应头读 GitHub 的配额事实。读不到就返回全 None（不猜）。"""
+    reset_raw = _int_header(headers, "x-ratelimit-reset")
+    reset_at = None
+    if reset_raw is not None:
+        try:
+            reset_at = datetime.fromtimestamp(reset_raw, tz=UTC).astimezone()
+        except (OverflowError, OSError, ValueError):
+            reset_at = None
+    retry_after = None
+    try:
+        raw_retry = headers.get("retry-after") if headers else None
+    except Exception:  # noqa: BLE001
+        raw_retry = None
+    if raw_retry not in (None, ""):
+        try:
+            retry_after = float(str(raw_retry).strip())
+        except (TypeError, ValueError):
+            retry_after = None
+    return RateInfo(
+        limit=_int_header(headers, "x-ratelimit-limit"),
+        remaining=_int_header(headers, "x-ratelimit-remaining"),
+        reset_at=reset_at,
+        retry_after=retry_after,
+    )
+
+
+def _looks_rate_limited(status: int, text: str, info: RateInfo) -> bool:
+    """判断这个失败是不是限流。
+
+    三个依据，任意一个成立即可：状态 429；`X-RateLimit-Remaining: 0`；body 里
+    出现限流措辞。只看 body 是不够的——自建 GHE/镜像的 body 可以是任意文案，
+    而 `Remaining: 0` 是结构化的、不会说谎。
+    """
+    if status not in (403, 429):
+        return False
+    if status == 429:
+        return True
+    if info.remaining == 0:
+        return True
+    return any(marker in (text or "") for marker in _RATE_LIMIT_MARKERS)
+
+
+def _when_retryable(info: RateInfo) -> str:
+    """把"什么时候能重试"变成一句人话；没有依据时**明确说没有**。"""
+    if info.retry_after is not None:
+        return f"{max(int(round(info.retry_after)), 1)} 秒后"
+    if info.reset_at is not None:
+        wait_min = max(int((info.reset_at - datetime.now(tz=info.reset_at.tzinfo)).total_seconds() // 60), 1)
+        return f"{info.reset_at:%H:%M} 之后（约 {wait_min} 分钟后）"
+    return ""
+
+
+def _rate_details(info: RateInfo) -> dict:
+    return {
+        "rate_limit": info.limit,
+        "rate_remaining": info.remaining,
+        "rate_reset_at": info.reset_at.isoformat() if info.reset_at else None,
+        "retry_after_s": info.retry_after,
+        "token_configured": bool(settings.github_token),
+    }
+
+
+def _rate_limit_hint(info: RateInfo) -> str:
+    """限流提示的**唯一**来源（错误响应、doctor、日志都走它，避免三处各说一套）。"""
+    parts: list[str] = []
+    if settings.github_token:
+        parts.append("已配置 REPOLEARN_GITHUB_TOKEN（上限 5000 次/小时）")
+    else:
+        parts.append("未配置 REPOLEARN_GITHUB_TOKEN（未认证上限 60 次/小时）")
+    if info.remaining is not None and info.limit is not None:
+        parts.append(f"剩余 {info.remaining}/{info.limit}")
+    elif info.remaining is not None:
+        parts.append(f"剩余 {info.remaining}")
+    when = _when_retryable(info)
+    if when:
+        parts.append(f"{when}可重试")
+    else:
+        parts.append("重置时间未在响应头中给出，可到 https://api.github.com/rate_limit 查询")
+    parts.append(f"端点 {_api()}")
+    if not settings.github_token:
+        parts.append("在 .env 填 REPOLEARN_GITHUB_TOKEN 后重启 API 可提升到 5000 次/小时")
+    return "；".join(parts)
 
 
 # --------------------------------------------------------------------------- #
@@ -256,7 +442,8 @@ def _raise_mapped(exc: LlmError) -> None:
     """
     if exc.status is None:
         raise _unreachable(exc) from exc
-    raise _map_github_error(int(exc.status), exc.message) from exc
+    # 头部要一起传：限流的"还剩多少、几点重置"只在响应头里。
+    raise _map_github_error(int(exc.status), exc.message, getattr(exc, "headers", None)) from exc
 
 
 def _too_large(measured: int, limit: int) -> AppError:
@@ -274,28 +461,45 @@ def _too_large(measured: int, limit: int) -> AppError:
 # --------------------------------------------------------------------------- #
 
 
-async def fetch_repo_meta(ref: RepoRef) -> RepoMeta:
-    url = f"{_api()}/repos/{ref.full_name}"
-    async with new_client(timeout_read=20.0) as client:
+async def _get_json(url: str, *, headers: dict[str, str], attempts: int, timeout_read: float):
+    """GET 一次 JSON，并把三类失败翻译成本产品错误码。
+
+    抽出来的唯一理由：`list_tree` / `fetch_raw_file` v1 漏了这段翻译，于是端点
+    回 403 时 `LlmError` 一路穿到 API 层变成 **500 INTERNAL**——用户看到"服务内部
+    错误，可重试"，而真实原因是限流或 token 无效（github.py 自己的 docstring
+    早就记过这个坑，只是当时只修了两个函数）。
+    """
+    async with new_client(timeout_read=timeout_read) as client:
         try:
-            resp = await request_with_retry(client, "GET", url, headers=_headers(), attempts=3)
+            resp = await request_with_retry(client, "GET", url, headers=headers, attempts=attempts)
         except AppError:
             raise
         except LlmError as exc:  # 端点回了 4xx/5xx：按语义映射，不要一律报"不可达"
             _raise_mapped(exc)
         except Exception as exc:  # noqa: BLE001 - 端点不可达要给可执行的 hint
             raise _unreachable(exc) from exc
-        # `/repos` 正常不重定向，但"正常"不是信任理由：端点由用户配置，能返回任意
-        # 跳转。逐跳校验的成本是一行，漏掉的成本是一条 SSRF。
+        # 正常不重定向，但"正常"不是信任理由：端点由用户配置，能返回任意跳转。
+        # 逐跳校验的成本是一行，漏掉的成本是一条 SSRF。
         _check_redirects(resp)
-        data = resp.json()
+        return resp
+
+
+async def fetch_repo_meta(ref: RepoRef) -> RepoMeta:
+    key = ("meta", ref.full_name)
+    cached = _cache_get(key)
+    if isinstance(cached, RepoMeta):
+        return cached
+    resp = await _get_json(
+        f"{_api()}/repos/{ref.full_name}", headers=_headers(), attempts=3, timeout_read=20.0
+    )
+    data = resp.json()
     if not isinstance(data, dict):
         raise AppError("PROVIDER_UNAVAILABLE", "GitHub 返回的不是对象", details={"endpoint": _api()})
     # 出站字段白名单：只取这 10 个，其余（clone_url/archive_url/avatar_url/…）
     # 一律丢弃。多取一个字段就是多一条"前端把它当链接渲染"的潜在注入面。
     lic = data.get("license") or {}
     owner = data.get("owner") or {}
-    return RepoMeta(
+    meta = RepoMeta(
         full_name=str(data.get("full_name") or ref.full_name),
         owner=str(owner.get("login") or ref.owner) if isinstance(owner, dict) else ref.owner,
         name=str(data.get("name") or ref.name),
@@ -308,23 +512,24 @@ async def fetch_repo_meta(ref: RepoRef) -> RepoMeta:
         size_kb=int(data.get("size", 0) or 0),
         is_private=bool(data.get("private", False)),
     )
+    _cache_put(key, meta)
+    return meta
 
 
 async def resolve_commit(ref: RepoRef, branch: str, wanted_ref: str | None = None) -> CommitMeta:
     """取 HEAD（或指定 ref）的 sha。网络错误退避重试 3 次（spec §3.4 N2）。"""
     target = wanted_ref or branch
-    url = f"{_api()}/repos/{ref.full_name}/commits/{target}"
-    async with new_client(timeout_read=20.0) as client:
-        try:
-            resp = await request_with_retry(client, "GET", url, headers=_headers(), attempts=3)
-        except AppError:
-            raise
-        except LlmError as exc:
-            _raise_mapped(exc)
-        except Exception as exc:  # noqa: BLE001
-            raise _unreachable(exc) from exc
-        _check_redirects(resp)
-        data = resp.json()
+    key = ("commit", ref.full_name, target)
+    cached = _cache_get(key)
+    if isinstance(cached, CommitMeta):
+        return cached
+    resp = await _get_json(
+        f"{_api()}/repos/{ref.full_name}/commits/{target}",
+        headers=_headers(),
+        attempts=3,
+        timeout_read=20.0,
+    )
+    data = resp.json()
     if not isinstance(data, dict):
         raise AppError("PROVIDER_UNAVAILABLE", "Commit 响应不是对象", details={"endpoint": _api()})
     sha = str(data.get("sha") or "")
@@ -340,7 +545,7 @@ async def resolve_commit(ref: RepoRef, branch: str, wanted_ref: str | None = Non
     commit = data.get("commit") or {}
     author = (commit.get("author") or {}) if isinstance(commit, dict) else {}
     files = data.get("files") or []
-    return CommitMeta(
+    out = CommitMeta(
         sha=sha,
         committed_at=author.get("date") if isinstance(author, dict) else None,
         message=str(commit.get("message", ""))[:400] if isinstance(commit, dict) else "",
@@ -348,6 +553,8 @@ async def resolve_commit(ref: RepoRef, branch: str, wanted_ref: str | None = Non
         # `html_url` 同样要清洗：它可能被前端渲染。
         extra={"html_url": safe_html_url(data.get("html_url"), full_name=ref.full_name)},
     )
+    _cache_put(key, out)
+    return out
 
 
 async def download_tarball(ref: RepoRef, sha: str, max_bytes: int | None = None) -> bytes:
@@ -357,6 +564,10 @@ async def download_tarball(ref: RepoRef, sha: str, max_bytes: int | None = None)
     ② 流式累计字节（`Content-Length` 可以撒谎或干脆不给）；③ 解包期累计由
     `ingest/tarball.py` 负责（压缩比极高时压缩后体积说明不了展开后的代价）。
     重定向逐跳校验见 `_check_redirects`。
+
+    tarball **不进缓存**：它可能有几十 MB，而缓存的目的是省配额（tarball 走
+    `api.github.com` 的 tarball 端点，不占 API 配额的那部分是 codeload 的重定向），
+    把大对象塞进进程内存换来的是内存风险而不是配额收益。
     """
     limit = (max_bytes or settings.max_repo_mb * 1024 * 1024)
     url = f"{_api()}/repos/{ref.full_name}/tarball/{sha}"
@@ -364,7 +575,8 @@ async def download_tarball(ref: RepoRef, sha: str, max_bytes: int | None = None)
         async with client.stream("GET", url, headers=_headers()) as resp:
             if resp.status_code >= 400:
                 body = (await resp.aread()).decode("utf-8", "ignore")
-                raise _map_github_error(resp.status_code, body)
+                # 头部要传：限流的"剩余额度/重置时间"只在头里。
+                raise _map_github_error(resp.status_code, body, resp.headers)
             _check_redirects(resp)
             declared = resp.headers.get("content-length")
             if declared and declared.isdigit() and int(declared) > limit:
@@ -379,11 +591,13 @@ async def download_tarball(ref: RepoRef, sha: str, max_bytes: int | None = None)
 
 async def list_tree(ref: RepoRef, sha: str) -> list[dict]:
     """Git Trees API。tarball 超限时的降级路径：只挑核心文件（spec §3.4 N3）。"""
-    url = f"{_api()}/repos/{ref.full_name}/git/trees/{sha}?recursive=1"
-    async with new_client(timeout_read=30.0) as client:
-        resp = await request_with_retry(client, "GET", url, headers=_headers(), attempts=2)
-        _check_redirects(resp)
-        data = resp.json()
+    resp = await _get_json(
+        f"{_api()}/repos/{ref.full_name}/git/trees/{sha}?recursive=1",
+        headers=_headers(),
+        attempts=2,
+        timeout_read=30.0,
+    )
+    data = resp.json()
     out: list[dict] = []
     for item in (data.get("tree") or []) if isinstance(data, dict) else []:
         if not isinstance(item, dict) or item.get("type") != "blob":
@@ -393,18 +607,47 @@ async def list_tree(ref: RepoRef, sha: str) -> list[dict]:
 
 
 async def fetch_raw_file(ref: RepoRef, sha: str, path: str, max_bytes: int = 512 * 1024) -> str:
-    url = f"{_api()}/repos/{ref.full_name}/contents/{path}?ref={sha}"
-    headers = {**_headers(), "Accept": "application/vnd.github.raw"}
-    async with new_client(timeout_read=30.0) as client:
-        resp = await request_with_retry(client, "GET", url, headers=headers, attempts=2)
-        _check_redirects(resp)
-        return resp.text[:max_bytes]
+    resp = await _get_json(
+        f"{_api()}/repos/{ref.full_name}/contents/{path}?ref={sha}",
+        headers={**_headers(), "Accept": "application/vnd.github.raw"},
+        attempts=2,
+        timeout_read=30.0,
+    )
+    return resp.text[:max_bytes]
 
 
 def rate_limit_hint(remaining: int | None = None) -> str:
-    if settings.github_token:
-        return f"已配置 GitHub Token，剩余额度 {remaining if remaining is not None else '未知'}；端点 {_api()}"
-    return (
-        f"未配置 REPOLEARN_GITHUB_TOKEN，端点 {_api()}，限额 60 次/小时；"
-        "配置后可提升到 5000 次/小时"
-    )
+    """限流提示（不带响应头时的形态）。
+
+    带响应头的路径走 `_rate_limit_hint(RateInfo)`——那里能说出"剩余 N/M、几点重置"。
+    这个函数保留给 doctor / 日志这类拿不到响应的地方。
+    """
+    return _rate_limit_hint(RateInfo(limit=None, remaining=remaining))
+
+
+def token_diagnostics() -> dict:
+    """`REPOLEARN_GITHUB_TOKEN` 的**可公开**诊断信息（doctor 用）。
+
+    只放指纹（前 4 + 后 4）与长度，不放明文：这块信息要显示在一个
+    "我到底读到的是哪一个 token"的排查面板上，而那个面板的截图经常被贴进
+    issue。
+
+    `padded=True` 是一个真实存在的故障：`REPOLEARN_GITHUB_TOKEN= ghp_xxx`
+    （等号后多一个空格）能通过 dotenv 解析，于是 GitHub 收到
+    `Authorization: Bearer  ghp_xxx` 并回 401 `Bad credentials`——用户看到的
+    是"token 无效"，而 token 本身是好的。这里把它指出来。
+    """
+    raw = settings.github_token or ""
+    token = raw.strip()
+    if not token:
+        return {"configured": False, "fingerprint": None, "padded": False, "length": 0}
+    if len(token) <= 12:
+        fingerprint = f"{token[:2]}…{token[-2:]}"
+    else:
+        fingerprint = f"{token[:4]}…{token[-4:]}"
+    return {
+        "configured": True,
+        "fingerprint": fingerprint,
+        "padded": raw != token,
+        "length": len(token),
+    }

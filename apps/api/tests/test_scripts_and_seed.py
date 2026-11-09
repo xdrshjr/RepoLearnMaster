@@ -82,6 +82,24 @@ def test_start_ps1_pins_node_env():
     assert '$env:NODE_ENV = "production"' in text
 
 
+def test_start_ps1_preserves_env_encoding():
+    """`.env` 的读写必须显式走**无 BOM 的 UTF-8**（这条是实际故障的回归）。
+
+    故障链：PowerShell 5.1 的 `Get-Content -Raw` 用 ANSI 代码页读 UTF-8 文件，
+    中文注释被解成乱码；`Set-Content -Encoding UTF8` 又写回 BOM。结果是
+    * 文件头出现 BOM，pydantic-settings 读到的第一个键名变成 "\\ufeffREPOLEARN_ENV"；
+    * 乱码注释吞掉换行，下一行的 `REPOLEARN_WEB_PORT=3000` 被并进注释里。
+    症状是"我明明配了却没生效"，而配置本身看起来是存在的。
+    """
+    text = _read(START_PS1)
+    assert "UTF8Encoding($false)" in text
+    assert "[System.IO.File]::ReadAllText($envPath, $utf8NoBom)" in text
+    assert "[System.IO.File]::WriteAllText($envPath, $envText, $utf8NoBom)" in text
+    # 回退到这两行就等于把故障装回去：前者按 ANSI 解码，后者写 BOM。
+    assert "Get-Content $envPath" not in text
+    assert "Set-Content -Path $envPath" not in text
+
+
 def test_start_ps1_refuses_to_run_on_busy_ports():
     text = _read(START_PS1)
     assert "Get-NetTCPConnection" in text

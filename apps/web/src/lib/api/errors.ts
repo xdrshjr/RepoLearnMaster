@@ -115,9 +115,9 @@ export const ERROR_COPY: Record<ErrorCode, ErrorCopy> = {
   BUDGET_EXCEEDED: {
     code: 'BUDGET_EXCEEDED',
     http: 402,
-    title: '预算已用尽',
+    title: '生成预算已用尽',
     message: '本次生成的 token / 美元预算已经耗尽。',
-    hint: '已生成的课时可以正常学习；点“继续生成”追加预算，或把 critic 这类角色换成更便宜的模型。',
+    hint: '已生成的课时可以正常学习；在 .env 调大 REPOLEARN_JOB_MAX_TOKENS / REPOLEARN_JOB_MAX_USD 后重启 API 再点「重新生成」（会复用缓存），或把 critic 这类角色换成更便宜的模型。',
     retryable: true,
   },
   JOB_NOT_FOUND: {

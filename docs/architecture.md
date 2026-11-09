@@ -78,12 +78,16 @@ N1 normalize_repo → N2 resolve_commit → N3 fetch_repo → N4 analyze_repo
 
 | 层 | 默认 | 闸门位置 | 超限 |
 |---|---|---|---|
-| Job | 180k tokens / 0.35 USD / 25 分钟 | `budget_guard.JobBudget`（runner 持有） | `failed_budget`，已发布课时保留 |
-| 节点 | N5 20k、N6 每课时 9k、N7 每课时 2k，预留 28k 给重试 | 每次 Kernel 调用前下发 | 只让该课时失败 |
-| Run | 跟随节点下发（9k–20k），`maxTurns=16` | Kernel `budget.ts` | Kernel 主动 abort 并回 `budget.exceeded` |
+| Job | 2,000k tokens / 50 USD / 25 分钟 | `budget_guard.JobBudget`（runner 持有） | `failed_budget`，已发布课时保留 |
+| 节点 | N5 200k、N6 每课时 120k、N7 每课时 20k，预留 400k 给重试 | 每次 Kernel 调用前下发 | 只让该课时失败 |
+| Run | 跟随节点下发（20k–200k），`maxTurns=16` | Kernel `budget.ts`（绝对天花板 4,000k） | Kernel 主动 abort 并回 `budget.exceeded` |
+
+> 2026-11-09 放宽：v1 的 N5=20k 在真实仓库上必定撞墙（实测单次规划 30,212 tokens），
+> 课程刚过 N5 就 `failed_budget`。节点分闸与 Job 总闸**同量级放大**，因为它们
+> 互相钳制（`node_allowance = min(节点分闸, 剩余额度)`），只放大一边等于没放大。
 
 **先到的那个生效。** 没有价格的模型记 0 并带 `PRICE_UNKNOWN`——不猜价格，
-否则"≤0.35 USD"这条门禁会变成假数据。
+否则"≤50 USD"这条门禁会变成假数据。
 
 ## 7. 可追溯性怎么变成代码
 

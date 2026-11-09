@@ -77,8 +77,12 @@ class Settings(BaseSettings):
 
     max_concurrent_jobs: int = 1
     job_deadline_ms: int = 1_500_000
-    job_max_tokens: int = 180_000
-    job_max_usd: float = 0.35
+    #: Job 级 token 总闸。2026-11-09 从 180_000 放宽到 2_000_000：v1 的
+    #: `plan_curriculum` 节点分闸只有 20k，真实仓库单次规划就用到 30k+，
+    #: 课程在 N5 就 `failed_budget`。两档一起放宽后，"跑一门课"不再因为
+    #: 预算而在中段死掉；要收紧时改这里（或 `REPOLEARN_JOB_MAX_TOKENS`）。
+    job_max_tokens: int = 2_000_000
+    job_max_usd: float = 50.0
     heartbeat_seconds: int = 15
     job_stale_seconds: int = 90
 

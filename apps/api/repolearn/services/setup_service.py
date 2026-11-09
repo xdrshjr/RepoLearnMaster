@@ -592,19 +592,43 @@ async def doctor(session) -> list[dict[str, Any]]:
             "hint": None if tts_ok else "未配置时课程自动切换为字幕推进模式",
         }
     )
-    checks.append(
-        {
-            "name": "GitHub 凭据",
-            "status": "ok" if settings.github_token else "degraded",
-            "detail": "已配置 Token" if settings.github_token else "未配置（60 次/小时）",
-            "hint": None if settings.github_token else "在 .env 设置 REPOLEARN_GITHUB_TOKEN 提升到 5000 次/小时",
-        }
-    )
+    # 「GitHub 凭据」这一项的判据是**进程里实际读到的值**，不是"文件里写了没"：
+    # 改完 .env 忘了重启 API 时，用户看到的就是"我明明配了它却说没配"。
+    from repolearn.ingest.github import token_diagnostics
+
+    token = token_diagnostics()
+    if token["configured"]:
+        token_hint = None
+        if token["padded"]:
+            token_hint = (
+                "值里有首尾空白（dotenv 会保留它，GitHub 会因此回 401 Bad credentials）；"
+                "请删掉等号后的空格并存成不带空白的值"
+            )
+        checks.append(
+            {
+                "name": "GitHub 凭据",
+                "status": "ok",
+                "detail": f"已配置 {token['fingerprint']}（长度 {token['length']}，上限 5000 次/小时）",
+                "hint": token_hint,
+            }
+        )
+    else:
+        checks.append(
+            {
+                "name": "GitHub 凭据",
+                "status": "degraded",
+                "detail": "未配置 → 未认证调用，上限 60 次/小时",
+                "hint": (
+                    "两步：① 在 .env 的 REPOLEARN_GITHUB_TOKEN= 后面粘贴 PAT；"
+                    "② .\\stop.ps1 然后 .\\start.ps1 -SkipInstall（改 .env 后必须重启 API 才生效）"
+                ),
+            }
+        )
     checks.append(
         {
             "name": "GitHub 接入点",
             "status": "ok",
-            "detail": f"{settings.github_api} · token={'是' if settings.github_token else '否'}",
+            "detail": f"{settings.github_api} · token={'是' if token['configured'] else '否'}",
             "hint": None
             if settings.github_api == "https://api.github.com"
             else "已指向自定义端点（GHE/镜像）；端点返回内容按不可信数据处理",

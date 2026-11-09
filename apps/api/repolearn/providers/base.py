@@ -29,6 +29,7 @@ class LlmError(Exception):
         retryable: bool = True,
         status: int | None = None,
         retry_after_s: float | None = None,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -36,6 +37,11 @@ class LlmError(Exception):
         self.retryable = retryable
         self.status = status
         self.retry_after_s = retry_after_s
+        #: 上游响应的头部（已小写化）。限流的**真实原因**在头里而不在 body 里：
+        #: `X-RateLimit-Remaining: 0` + `X-RateLimit-Reset: <epoch>` 才能回答
+        #: "什么时候能重试、还剩多少额度"，而 body 只说 "rate limit exceeded"。
+        #: 只放头部，不放 body 之外的任何凭据（Authorization 不会出现在响应头里）。
+        self.headers = headers or {}
 
 
 @dataclass(frozen=True)

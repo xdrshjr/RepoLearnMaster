@@ -79,6 +79,12 @@ if (-not (Test-Path $envPath)) {
     Say "  created .env from .env.example"
 }
 
+# .env is UTF-8 (comments are Chinese). PowerShell 5.1 will silently mis-decode a
+# UTF-8 file with the ANSI code page and `Set-Content -Encoding UTF8` writes a BOM
+# back, which pydantic-settings then sees as part of the first key name. Both
+# directions go through an explicit BOM-less UTF-8 encoder instead.
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
 function New-UrlSafeKey {
     $bytes = New-Object byte[] 32
     $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -93,7 +99,7 @@ function New-Token {
     return [Convert]::ToBase64String($bytes).Replace("+", "-").Replace("/", "_").Replace("=", "")
 }
 
-$envText = Get-Content $envPath -Raw
+$envText = [System.IO.File]::ReadAllText($envPath, $utf8NoBom)
 $changed = $false
 if ($envText -notmatch "(?m)^REPOLEARN_SECRET_KEY=.+") {
     $key = New-UrlSafeKey
@@ -117,12 +123,12 @@ if ($Prod) {
     $changed = $true
 }
 if ($changed) {
-    Set-Content -Path $envPath -Value $envText -Encoding UTF8 -NoNewline
+    [System.IO.File]::WriteAllText($envPath, $envText, $utf8NoBom)
 }
 
 # parse the values we need in this script
 $settings = @{}
-foreach ($line in (Get-Content $envPath)) {
+foreach ($line in ([System.IO.File]::ReadAllLines($envPath, $utf8NoBom))) {
     if ($line -match "^\s*([A-Z0-9_]+)\s*=\s*(.*)$") {
         $settings[$Matches[1]] = $Matches[2].Trim()
     }
@@ -136,6 +142,13 @@ $apiPort = [int](SettingOr "REPOLEARN_API_PORT" "8000")
 $kernelPort = [int](SettingOr "REPOLEARN_KERNEL_PORT" "8787")
 $webPort = [int](SettingOr "REPOLEARN_WEB_PORT" "3000")
 $internalToken = SettingOr "REPOLEARN_INTERNAL_TOKEN" ""
+
+# GitHub's unauthenticated quota is 60 requests/hour, which one course import can
+# burn through. Say so at launch instead of letting the user meet it as a 429.
+if ((SettingOr "REPOLEARN_GITHUB_TOKEN" "") -eq "") {
+    Say "  ! REPOLEARN_GITHUB_TOKEN is empty -> GitHub allows 60 requests/hour only." "Yellow"
+    Say "    Put a PAT on that line in .env (5000 req/h) and restart to lift the limit." "Yellow"
+}
 
 # Resolve the pnpm launcher once.
 #

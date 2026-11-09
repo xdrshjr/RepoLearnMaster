@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import io
 import tarfile
+import time
 
 import httpx
 import pytest
@@ -26,6 +27,19 @@ from repolearn.ingest import github as gh
 from repolearn.ingest.tarball import extract_tarball
 
 BASE = "http://127.0.0.1:9911"
+
+
+@pytest.fixture(autouse=True)
+def _no_cached_github_calls():
+    """每个用例都从空缓存开始。
+
+    `fetch_repo_meta` / `resolve_commit` 有 60 秒进程内缓存（省 60 次/小时的配额），
+    而测试里"同一个 owner/repo"会在多条用例间重复出现。不清缓存的话，第二条
+    用例会拿到第一条的响应——症状是"mock 明明设好了却没被调用"，最难查的那种。
+    """
+    gh.reset_github_cache()
+    yield
+    gh.reset_github_cache()
 
 
 @pytest.fixture()
@@ -117,6 +131,205 @@ def test_rate_limit_error_mentions_endpoint(configured):
     err = gh._map_github_error(403, "API rate limit exceeded")
     assert err.code == "RATE_LIMITED"
     assert BASE in (err.hint or "")
+
+
+# --------------------------------------------------------------------------- #
+# T-GH-7..12：限流的**结构化**事实（响应头），不是 body 文案                 #
+# --------------------------------------------------------------------------- #
+
+
+def _rate_headers(*, remaining: str = "0", limit: str = "60", reset_in: int = 900, retry_after: str | None = None):
+    headers = {
+        "x-ratelimit-limit": limit,
+        "x-ratelimit-remaining": remaining,
+        "x-ratelimit-reset": str(int(time.time()) + reset_in),
+    }
+    if retry_after is not None:
+        headers["retry-after"] = retry_after
+    return headers
+
+
+def test_rate_limit_hint_reports_remaining_and_reset(configured):
+    """T-GH-7：403 + `X-RateLimit-*` → RATE_LIMITED，且 hint 说出剩余额度与重置时间。
+
+    这是用户实际遇到的那个报错：`GET /repos/{owner}/{repo}` 回
+    `403 rate limit exceeded`。v1 的提示只说"配置 token"，不说"60 格已经用光、
+    14:05 之后才恢复"，于是用户唯一能做的就是反复重试。
+    """
+    err = gh._map_github_error(403, "API rate limit exceeded", _rate_headers())
+    assert err.code == "RATE_LIMITED"
+    assert err.retryable is True
+    assert err.status == 429
+    hint = err.hint or ""
+    assert "剩余 0/60" in hint, hint
+    assert "可重试" in hint, hint
+    assert BASE in hint, hint
+    # 结构化字段进 details，前端/日志不必再解析中文提示
+    assert err.details["rate_remaining"] == 0
+    assert err.details["rate_limit"] == 60
+    assert err.details["rate_reset_at"]
+
+
+def test_secondary_rate_limit_uses_retry_after(configured):
+    """T-GH-8：`Retry-After` 优先于 `X-RateLimit-Reset`（secondary limit 的形态）。"""
+    err = gh._map_github_error(429, "You have exceeded a secondary rate limit", _rate_headers(retry_after="42"))
+    assert err.code == "RATE_LIMITED"
+    assert "42 秒后" in (err.hint or ""), err.hint
+    assert err.details["retry_after_s"] == 42.0
+
+
+def test_bad_credentials_maps_to_invalid_key(configured):
+    """T-GH-9：401 → INVALID_KEY（"token 无效"），**不是** REPO_FORBIDDEN（"仓库私有"）。
+
+    这两件事的下一步动作完全不同：前者去改 .env，后者去换仓库。混成一个码，
+    用户就只能两件事都试一遍。
+    """
+    err = gh._map_github_error(401, '{"message":"Bad credentials"}')
+    assert err.code == "INVALID_KEY"
+    assert err.status == 401
+    assert "REPOLEARN_GITHUB_TOKEN" in (err.hint or "")
+    # 403 上的 bad credentials 同样按鉴权失败处理（GitHub 两种状态都用过）
+    assert gh._map_github_error(403, "Bad credentials").code == "INVALID_KEY"
+
+
+def test_plain_forbidden_stays_repo_forbidden(configured):
+    """T-GH-10：既不是限流也不是鉴权失败的 403 仍然走 REPO_FORBIDDEN。"""
+    err = gh._map_github_error(403, '{"message":"Forbidden"}')
+    assert err.code == "REPO_FORBIDDEN"
+
+
+@pytest.mark.asyncio
+async def test_raw_file_and_tree_translate_errors(configured):
+    """T-GH-11：`list_tree` / `fetch_raw_file` 必须抛 AppError，不能漏出 LlmError。
+
+    漏了翻译的后果不是"错误码不好看"：`LlmError` 继承 `Exception` 而不是 `AppError`，
+    路由层的 `except AppError` 接不住它，于是限流变成 **500 INTERNAL「服务内部错误，
+    可重试」**——用户按提示重试，继续 500。
+    """
+    ref = gh.parse_repo_url(f"{BASE}/o/r")
+    with respx.mock(assert_all_called=False) as mock:
+        mock.route(url__startswith=BASE).mock(
+            return_value=httpx.Response(
+                403, json={"message": "API rate limit exceeded"}, headers=_rate_headers()
+            )
+        )
+        with pytest.raises(AppError) as tree_exc:
+            await gh.list_tree(ref, "a" * 40)
+        with pytest.raises(AppError) as raw_exc:
+            await gh.fetch_raw_file(ref, "a" * 40, "a.py")
+        with pytest.raises(AppError) as tarball_exc:
+            await gh.download_tarball(ref, "a" * 40)
+    for exc in (tree_exc, raw_exc, tarball_exc):
+        assert exc.value.code == "RATE_LIMITED"
+        assert "剩余 0/60" in (exc.value.hint or "")
+
+
+@pytest.mark.asyncio
+async def test_exhausted_quota_is_not_retried(configured):
+    """T-GH-12：`X-RateLimit-Remaining: 0` 时不做退避重试。
+
+    重试只会在同一格配额上再撞一次 403，代价是用户多等 1~3 秒才看到同一句话；
+    而 `request_with_retry` 的 `attempts=3` 会让"点一次生成"变成 3 次请求。
+    """
+    seen = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal seen
+        seen += 1
+        return httpx.Response(429, json={"message": "API rate limit exceeded"}, headers=_rate_headers())
+
+    with respx.mock(assert_all_called=False) as mock:
+        mock.route(url__startswith=BASE).mock(side_effect=handler)
+        with pytest.raises(AppError):
+            await gh.fetch_repo_meta(gh.parse_repo_url(f"{BASE}/o/r"))
+    assert seen == 1, seen
+
+
+# --------------------------------------------------------------------------- #
+# T-GH-13/14：60 秒缓存（省配额）                                              #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_meta_and_commit_are_cached(configured):
+    """T-GH-13：同一仓库 60 秒内只打一次 `/repos`、一次 `/commits`。
+
+    未配置 token 时配额是 60 次/小时，而"首页输地址看一眼 → 点生成"会用同一份
+    元数据请求两次。缓存是这里唯一不牺牲正确性的省法。
+    """
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if "/commits/" in request.url.path:
+            return httpx.Response(200, json={"sha": "a" * 40, "commit": {"author": {"date": "2026-01-01T00:00:00Z"}}})
+        return httpx.Response(
+            200,
+            json={"full_name": "o/r", "default_branch": "main", "html_url": f"{BASE}/o/r"},
+        )
+
+    with respx.mock(assert_all_called=False) as mock:
+        mock.route(url__startswith=BASE).mock(side_effect=handler)
+        ref = gh.parse_repo_url(f"{BASE}/o/r")
+        first = await gh.fetch_repo_meta(ref)
+        second = await gh.fetch_repo_meta(ref)
+        assert first is second  # 同一个对象：真的走了缓存
+        await gh.resolve_commit(ref, "main")
+        await gh.resolve_commit(ref, "main")
+    assert len([c for c in calls if "/commits/" in c]) == 1, calls
+    assert len([c for c in calls if c.endswith("/repos/o/r")]) == 1, calls
+
+
+@pytest.mark.asyncio
+async def test_cache_ttl_zero_disables_caching(configured, monkeypatch):
+    """T-GH-14：`CACHE_TTL_SECONDS=0` 关掉缓存；失败结果**永不**进缓存。"""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"full_name": "o/r", "default_branch": "main"})
+
+    monkeypatch.setattr(gh, "CACHE_TTL_SECONDS", 0.0)
+    with respx.mock(assert_all_called=False) as mock:
+        mock.route(url__startswith=BASE).mock(side_effect=handler)
+        ref = gh.parse_repo_url(f"{BASE}/o/r")
+        await gh.fetch_repo_meta(ref)
+        await gh.fetch_repo_meta(ref)
+    assert len(calls) == 2
+
+    # 失败不进缓存：第一次 403，第二次必须真的再打一次并成功
+    monkeypatch.setattr(gh, "CACHE_TTL_SECONDS", 60.0)
+    gh.reset_github_cache()
+    responses = [
+        httpx.Response(403, json={"message": "Forbidden"}),
+        httpx.Response(200, json={"full_name": "o/r", "default_branch": "main"}),
+    ]
+    with respx.mock(assert_all_called=False) as mock:
+        mock.route(url__startswith=BASE).mock(side_effect=lambda request: responses.pop(0))
+        ref = gh.parse_repo_url(f"{BASE}/o/r")
+        with pytest.raises(AppError):
+            await gh.fetch_repo_meta(ref)
+        meta = await gh.fetch_repo_meta(ref)
+    assert meta.full_name == "o/r"
+
+
+def test_token_diagnostics_never_leaks_the_token(configured, monkeypatch):
+    """T-GH-15：doctor 的 token 诊断只给指纹，且能指出"等号后多了空格"。"""
+    monkeypatch.setattr(settings, "github_token", "ghp_" + "a" * 32 + "6789")
+    info = gh.token_diagnostics()
+    assert info["configured"] is True
+    assert info["fingerprint"] == "ghp_…6789"
+    assert info["length"] == 40
+    assert info["padded"] is False
+    assert "a" * 8 not in info["fingerprint"]
+
+    monkeypatch.setattr(settings, "github_token", "  ghp_abc  ")
+    padded = gh.token_diagnostics()
+    assert padded["configured"] is True
+    assert padded["padded"] is True  # 真实故障：Bearer 里带空格 → 401 Bad credentials
+
+    monkeypatch.setattr(settings, "github_token", "")
+    assert gh.token_diagnostics()["configured"] is False
 
 
 # --------------------------------------------------------------------------- #

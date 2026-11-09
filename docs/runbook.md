@@ -27,6 +27,39 @@ Get-Content var\logs\api.err.log -Tail 40            # 后端真正报错的位�
 | `seed-demo` 第二次执行报唯一约束 | 旧版本非幂等 | 已修复；如仍报错先 `cli migrate` 再跑 |
 | PowerShell 报"字符串缺少终止符" | 脚本被编辑器存成了无 BOM 的 UTF-8 + 中文 | 本仓库脚本一律 ASCII；改动时保持 ASCII，或存成 UTF-8 BOM；`scripts\parse_check.ps1` 可验证 |
 
+### 1.1 GitHub Token 配置与验证
+
+未认证调用只有 **60 次/小时**，而一次导入课程至少用掉 `/repos` + `/commits` 两格
+（大仓库还要 `/git/trees` 或 `/contents`）。配额用光时后端回
+`429 RATE_LIMITED`，提示里带「剩余 N/60、HH:MM 后可重试」——**看到这句就说明是配额，
+不是网络或代码问题**。
+
+```powershell
+# ① 配：.env 里这一行（经典 PAT 勾 public_repo；fine-grained PAT 只需 Contents: Read）
+#    REPOLEARN_GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+# ② 重启（API 只在启动时读 .env）
+.\stop.ps1
+.\start.ps1 -SkipInstall
+# ③ 验证：应显示 token 指纹，而不是"未配置"
+.\.venv\Scripts\python.exe -m repolearn.cli doctor
+#    [      ok] GitHub 凭据: 已配置 ghp_…6789（长度 40，上限 5000 次/小时）
+```
+
+三种失败形状与各自含义（**别混为一谈**，下一步动作完全不同）：
+
+| 现象 | 后端错误码 | 真实原因 | 处理 |
+|---|---|---|---|
+| `403 rate limit exceeded` + `X-RateLimit-Remaining: 0` | `RATE_LIMITED`（HTTP 429） | 配额耗尽（未认证 60/h，认证 5000/h） | 等提示里的时间，或配 token |
+| `401 Bad credentials` | `INVALID_KEY`（HTTP 401） | token 被撤销/过期/**等号后多了空格**（`Bearer  ghp_…`） | `cli doctor` 会指出 `padded`；修 `.env` 后重启 |
+| `403 Forbidden`（无 rate limit 字样） | `REPO_FORBIDDEN`（HTTP 403） | 仓库私有/被封禁 | 换公开仓库（MVP 不支持私有仓库） |
+
+省额度的两条实现细节（改代码时别顺手删掉）：
+
+* `fetch_repo_meta` / `resolve_commit` 有 **60 秒进程内缓存**（`CACHE_TTL_SECONDS`），
+  键含 `owner/repo` 与 ref；失败结果不进缓存，所以"修好 token 后立刻重试"能成功。
+* `X-RateLimit-Remaining: 0` 时 `request_with_retry` **不做退避重试**：重试只会
+  再撞一次同一格配额，代价是用户多等几秒。
+
 ## 2. 生成类
 
 | 症状 | 判断 | 处理 |
@@ -34,7 +67,7 @@ Get-Content var\logs\api.err.log -Tail 40            # 后端真正报错的位�
 | 课程一直是「生成中」 | API 在 N9 前重启过，`generating` 版本没收敛 | 重启 API：reaper 启动时会把它置 `failed` 并释放 `generation_locks`；或 `cli requeue-stale` |
 | Job 卡在 `running` 但没进度 | 心跳停了（进程被杀/挂死） | `cli requeue-stale`（阈值 `REPOLEARN_JOB_STALE_SECONDS`，默认 90s） |
 | 课程 `partial` | 部分课时失败 / 锚点覆盖率 < 80% / 章节不全 | 正常降级结果；看 `course.quality_report.reasons`，可点「重新生成」 |
-| `failed_budget` | 超 job 级预算（180k tokens / 0.35 USD / 25 分钟） | 提高 `REPOLEARN_JOB_MAX_TOKENS`，或收敛课程规模；已生成课时仍可读 |
+| `failed_budget` | 超 job 级预算（默认 2,000k tokens / 50 USD / 25 分钟）；错误提示里会写明是哪一档、对应哪个环境变量 | 提高 `.env` 的 `REPOLEARN_JOB_MAX_TOKENS` / `REPOLEARN_JOB_MAX_USD` / `REPOLEARN_JOB_DEADLINE_MS`（改完重启 API），或收敛课程规模；已生成课时仍可读 |
 | `CONTRACT_VIOLATION` | 模型产出连续两次不合 schema | 换更强的模型（设置 → 角色），或降低课时数 |
 | 课程内容明显是"简化版" | Agent 内核不可用（状态 C） | `pnpm -C services/agent-kernel install`；`cli doctor` 看 G1 |
 | 锚点行号对不上 | 分析降级（无 tree-sitter），或 commit 变了 | `pip install tree-sitter-language-pack`；或重建课程 |

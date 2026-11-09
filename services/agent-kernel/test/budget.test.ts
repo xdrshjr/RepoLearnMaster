@@ -57,12 +57,12 @@ test('没有 usage 回报时按字符数估算并标记 estimated', () => {
 });
 
 test('clampLimits 收敛到安全默认值', () => {
-  const l = clampLimits({ maxTokens: 999_999 });
-  assert.equal(l.maxTokens, 200_000);
+  const l = clampLimits({ maxTokens: 999_999_999 });
+  assert.equal(l.maxTokens, 4_000_000);
   assert.equal(l.maxTurns, 16);
 });
 
 test('显式超绝对上限被识别为违规（要 422，不是静默 clamp）', () => {
-  assert.equal(violatesAbsoluteLimits({ maxTokens: 200_001 }), 'maxTokens=200001 exceeds kernel ceiling 200000');
-  assert.equal(violatesAbsoluteLimits({ maxTokens: 20_000 }), null);
+  assert.equal(violatesAbsoluteLimits({ maxTokens: 4_000_001 }), 'maxTokens=4000001 exceeds kernel ceiling 4000000');
+  assert.equal(violatesAbsoluteLimits({ maxTokens: 2_000_000 }), null);
 });

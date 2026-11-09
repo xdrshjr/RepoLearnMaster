@@ -258,14 +258,17 @@ def test_publish_is_a_declared_state_key():
 
 
 def test_node_allowance_uses_node_name_not_schema_name():
-    budget = JobBudget(max_tokens=180_000)
-    assert budget.node_allowance("plan_curriculum") == 20_000
-    assert budget.node_allowance("simulate_trace") == 2_000
+    # 显式给总闸而不是读 settings：这条用例测的是**节点分闸表**，不该被
+    # `REPOLEARN_JOB_MAX_TOKENS` 这类环境变量左右（机器上有一个更小的值就会红）。
+    budget = JobBudget(max_tokens=2_000_000)
+    # 2026-11-09 放宽后：规划节点必须能容下一次 30k+ 的真实规划
+    assert budget.node_allowance("plan_curriculum") == 200_000
+    assert budget.node_allowance("simulate_trace") == 20_000
     assert budget.node_allowance("some_schema_name") == 8_000
 
-    # 按课时扇出时要给后续课时留出额度（28k 预留）：剩余额度紧张时才看得出差别
-    tight = JobBudget(max_tokens=180_000, used_tokens=160_000)
-    assert tight.node_allowance("write_lessons") == 9_000
+    # 按课时扇出时要给后续课时留出额度：剩余额度紧张时才看得出差别
+    tight = JobBudget(max_tokens=1_000_000, used_tokens=700_000)
+    assert tight.node_allowance("write_lessons") == 120_000
     assert tight.node_allowance("write_lessons", per_lesson=True) == 1_000
 
 
