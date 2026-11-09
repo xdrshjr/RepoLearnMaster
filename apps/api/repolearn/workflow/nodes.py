@@ -504,6 +504,8 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
         await _emit("synthesize_audio")
         narration: dict[str, Any] = {}
         warnings: list[dict] = []
+        disabled_reason = _tts_reason(ctx)
+        reported_disabled = False
         for key in (state.get("lessons") or {}):
             lesson = _load_artifact((state.get("lessons") or {}).get(key) or {}, ctx)
             steps: dict[str, Any] = {}
@@ -538,6 +540,25 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
                 "voiced_steps": voiced,
                 "steps": steps,
             }
+            if not voiced:
+                # 把真实原因写进 narration：前端/doctor/PDF 都能看到"为什么没声音"，
+                # 而不是只有一句"本节无配音"。
+                reason = _tts_reason(ctx)
+                if reason:
+                    narration[key]["no_voice_reason"] = reason
+
+        # 熔断后只报一次，而不是每步报一次（20 条重复警告会把真正的告警淹掉）
+        disabled_reason = _tts_reason(ctx)
+        if disabled_reason and not reported_disabled:
+            reported_disabled = True
+            warnings.append(
+                {
+                    "code": "TTS_DEGRADED",
+                    "message": f"配音已关闭，整门课使用字幕推进：{disabled_reason}",
+                    "severity": "warning",
+                    "node": "synthesize_audio",
+                }
+            )
         return {"narration": narration, "warnings": warnings}
 
     # ---- N9 ---------------------------------------------------------------
@@ -563,6 +584,17 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
 # --------------------------------------------------------------------------- #
 # 小工具                                                                       #
 # --------------------------------------------------------------------------- #
+
+
+def _tts_reason(ctx: Any) -> str | None:
+    """读 TTS 失败原因：优先"已熔断"，其次"最近一次失败"。
+
+    `make_nodes()` 在真实流程里拿到的是 NodeContext 包装对象（`tts_state` 指向 _Ctx），
+    单测里则常常直接传 _Ctx —— 两种形状都要支持，否则"警告没了"这种回归会在
+    单测里看不见（它只会在真机数据里消失）。
+    """
+    state = getattr(ctx, "tts_state", None) or ctx
+    return getattr(state, "tts_disabled_reason", None) or getattr(state, "tts_last_error", None)
 
 
 def _layer_of(state: dict, lesson_key: str) -> str:

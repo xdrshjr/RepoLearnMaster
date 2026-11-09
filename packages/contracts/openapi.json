@@ -2066,6 +2066,17 @@
           "lesson": {
             "$ref": "#/components/schemas/LessonBriefOut"
           },
+          "no_voice_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "No Voice Reason"
+          },
           "steps": {
             "items": {
               "$ref": "#/components/schemas/StepBundle"

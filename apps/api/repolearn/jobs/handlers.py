@@ -26,13 +26,16 @@ from repolearn.providers.agent_runtime import refresh_state
 from repolearn.providers.base import DEFAULT_AGENT_TOOLS, AgentBudget, AgentRunRequest
 from repolearn.providers.budget_guard import JobBudget, estimate_tokens, usd_for
 from repolearn.providers.registry import build_resolver
-from repolearn.providers.tts.doubao import DoubaoTts, TtsConfigIn
+from repolearn.providers.tts import make_tts
 from repolearn.services import object_store
 from repolearn.services.setup_service import active_profile, profile_llm_configs
 from repolearn.workflow import NODE_LABELS, NODE_PROGRESS, NodeContext
 from repolearn.workflow.publish import publish as publish_course_assets
 
 log = get_logger("handlers")
+
+#: 连续多少次 TTS 失败后放弃合成（整门课转字幕模式）。
+TTS_FAILURE_THRESHOLD = 3
 
 
 @dataclass
@@ -62,7 +65,7 @@ class _Ctx:
         course_id: str,
         resolver: Any,
         budget: JobBudget,
-        tts: DoubaoTts | None,
+        tts: Any | None,  # DoubaoTts / QwenTts —— 两个 provider 共用同一组方法
         runtime_mode: str,
         emit: Any,
     ) -> None:
@@ -75,6 +78,12 @@ class _Ctx:
         self._emit = emit
         self.sha = ""
         self._line_counts: dict[tuple[str, str], int] = {}
+        # TTS 熔断状态：连续失败到阈值就整门课放弃合成（见 synthesize）
+        self.tts_failures = 0
+        #: 最近一次失败原因（用于展示），与"已熔断"是两件事
+        self.tts_last_error: str | None = None
+        #: 非 None 表示已熔断（连续失败到阈值），整门课不再尝试合成
+        self.tts_disabled_reason: str | None = None
 
     # ---- 模型调用 --------------------------------------------------------
     async def run(self, role: str, system: str, prompt: str, **kwargs: Any) -> tuple[str, dict]:
@@ -231,6 +240,20 @@ class _Ctx:
         except Exception as exc:  # noqa: BLE001
             log.warning("commit_file_count_persist_failed", sha8=self.sha[:8], error=str(exc)[:200])
 
+    def _note_tts_failure(self, error: dict | None) -> None:
+        """累计失败；到阈值就熔断，并保留**真实原因**给上层展示。
+
+        阈值 3 是经验值：偶发的一次超时应该继续尝试（下一段可能就成功），
+        而凭据错/网关不支持这类问题必然连续失败，3 次足够判定。
+        """
+        self.tts_failures += 1
+        reason = str((error or {}).get("message") or (error or {}).get("code") or "未知原因")[:300]
+        self.tts_last_error = reason
+        # 只在**连续**失败到阈值时才熔断：一次网络抖动不该让整门课没有配音。
+        if self.tts_failures >= TTS_FAILURE_THRESHOLD:
+            self.tts_disabled_reason = reason
+            log.warning("tts_circuit_open", failures=self.tts_failures, reason=reason[:200])
+
     # ---- 进度 ------------------------------------------------------------
     async def emit_progress(self, node: str, percent: int = 0) -> None:
         await self._emit(node, NODE_PROGRESS.get(node, percent))
@@ -245,6 +268,9 @@ class _Ctx:
         而实际 8 秒就静音——这类"看起来有配音"的假象比没有配音更难排查。
         """
         if self.tts is None or not self.tts.configured:
+            return None, "estimated"
+        if self.tts_disabled_reason is not None:
+            # 已经判定"这家 TTS 今天不能出声"：不再发请求，直接把原因留给上层。
             return None, "estimated"
         texts = [str(s.get("text", "")) for s in segments if str(s.get("text", "")).strip()]
         if not texts:
@@ -271,7 +297,9 @@ class _Ctx:
             result = await self.tts.synthesize(text)
             if not result.ok or not result.audio_bytes:
                 # 单段失败即整体降级为字幕：拼接不完整的音频会让时间轴失真
+                self._note_tts_failure(result.error)
                 return None, "estimated"
+            self.tts_failures = 0
             pieces.append(result.audio_bytes)
             total_ms += result.duration_ms
             key = object_store.put_content_addressed("audio", result.audio_bytes, ".mp3")
@@ -357,7 +385,7 @@ async def _lookup_audio(digest: str) -> dict | None:
 
 
 async def _store_audio(
-    tts: DoubaoTts, digest: str, key: str, duration_ms: int, source: str, size: int, text: str
+    tts: Any, digest: str, key: str, duration_ms: int, source: str, size: int, text: str
 ) -> None:
     from repolearn.models import AudioAsset
 
@@ -381,6 +409,32 @@ async def _store_audio(
 # --------------------------------------------------------------------------- #
 # 课程生成主流程                                                               #
 # --------------------------------------------------------------------------- #
+
+
+def build_node_context(ctx: Any, *, job_id: str, runtime_mode: str) -> NodeContext:
+    """把 `_Ctx` 包装成节点能用的 `NodeContext`。
+
+    为什么单独一个函数：包装对象**只带被显式挂上去的东西**，漏一项就是一类静默缺陷
+    （2026-11-09 真机：`tts_state` 忘了透传 → N8 读不到熔断原因 → 课程里既没有
+    `TTS_DEGRADED` 警告也没有 `no_voice_reason`，用户只看到"本节无配音"）。
+    抽出来之后 `tests/test_tts_node_context_seam.py` 调的是产品代码，改漏了就红。
+    """
+    node_ctx = NodeContext(
+        run=ctx.run,
+        read_file=ctx.read_file,
+        line_count=ctx.line_count,
+        save_artifact=ctx.save_artifact,
+        emit_progress=ctx.emit_progress,
+        job_id=job_id,
+    )
+    # NodeContext 是 dataclass 且节点需要的能力不止那六项：publish / load / tts / 模式。
+    node_ctx.load_artifact = ctx.load_artifact
+    node_ctx.publish = ctx.publish
+    node_ctx.synthesize = ctx.synthesize
+    node_ctx.runtime_mode = runtime_mode
+    # N8 要讲清"为什么没有配音"，而熔断状态在 _Ctx 上。
+    node_ctx.tts_state = ctx
+    return node_ctx
 
 
 async def run_course_job(
@@ -413,9 +467,15 @@ async def run_course_job(
             configs, roles = profile_llm_configs(profile)
         resolver = build_resolver(roles, configs)
 
-    tts = None
-    if payload.get("tts"):
-        tts = DoubaoTts(TtsConfigIn(**payload["tts"]))
+    # TTS：课程 payload 显式给的优先，否则用 `.env` 的 REPOLEARN_TTS_PROVIDER。
+    #
+    # 这一行曾经是 `tts = None; if payload.get("tts"): …`，而 `payload["tts"]` 从来没有
+    # 被任何代码写入过（create_course / rebuild 的 payload 只有 repo_url/ref/commit/
+    # language，/setup 的 TTS 只进了 last_probe）——于是**课程永远没有配音**，用户却
+    # 以为是豆包配额或凭据问题。现在 `.env` 是唯一真源，显式 payload 仍可覆盖。
+    tts = make_tts(payload.get("tts"))
+    if tts is not None:
+        log.info("tts_selected", provider=getattr(tts, "provider", "?"), configured=bool(getattr(tts, "configured", False)))
 
     async def emit_node(node: str, progress: int) -> None:
         await emit("node.completed", {"node": node, "label": NODE_LABELS.get(node, node), "progress": progress})
@@ -431,19 +491,7 @@ async def run_course_job(
     )
     ctx.sha = str((payload.get("commit") or {}).get("sha", "")) if payload.get("commit") else ""
 
-    node_ctx = NodeContext(
-        run=ctx.run,
-        read_file=ctx.read_file,
-        line_count=ctx.line_count,
-        save_artifact=ctx.save_artifact,
-        emit_progress=ctx.emit_progress,
-        job_id=job_id,
-    )
-    # NodeContext 是 dataclass，额外挂上节点需要的其余能力（publish / load / tts / 模式）
-    node_ctx.load_artifact = ctx.load_artifact
-    node_ctx.publish = ctx.publish
-    node_ctx.synthesize = ctx.synthesize
-    node_ctx.runtime_mode = runtime.mode
+    node_ctx = build_node_context(ctx, job_id=job_id, runtime_mode=runtime.mode)
 
     # 先把 N1 需要的 repo_url 与 N2 需要的 ref 放进初始 state
     from repolearn.workflow.state import new_state

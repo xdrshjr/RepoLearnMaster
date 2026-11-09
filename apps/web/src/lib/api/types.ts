@@ -255,6 +255,8 @@ export interface PlaybackBundle {
   steps: StepBundle[];
   files: FileRef[];
   trace?: Trace | null;
+  /** 为什么这一课没有配音（TTS 未配置 / 凭据错 / 网关不支持…）。 */
+  no_voice_reason?: string | null;
 }
 
 export interface LessonDetail {

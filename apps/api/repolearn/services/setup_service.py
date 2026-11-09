@@ -583,13 +583,30 @@ async def doctor(session) -> list[dict[str, Any]]:
             "hint": None if profile else "打开 /setup 完成配置引导",
         }
     )
-    tts_ok = bool(settings.doubao_app_id and settings.doubao_access_token)
+    # 这里过去只看 `doubao_app_id and doubao_access_token`，于是：
+    # * 换成 qwen 时永远显示"未配置"；
+    # * 更糟的是它只证明"变量非空"，不证明 TTS 真的接进了生成流程。
+    # 现在统一走 `tts.describe()`，detail 里带上 provider 与音色。
+    from repolearn.providers.tts import describe as describe_tts
+
+    tts_state = describe_tts()
+    if tts_state["provider"] == "none":
+        tts_status, tts_detail = "degraded", "已关闭（强制字幕模式）"
+        tts_hint = "REPOLEARN_TTS_PROVIDER=none：课程只走字幕推进"
+    elif tts_state["configured"]:
+        tts_status, tts_detail = "ok", f"{tts_state['provider']} · {tts_state['voice'] or '默认音色'}"
+        tts_hint = None
+    else:
+        tts_status = "degraded"
+        missing = "REPOLEARN_QWEN_API_KEY" if tts_state["provider"] == "qwen" else "REPOLEARN_DOUBAO_APP_ID / REPOLEARN_DOUBAO_ACCESS_TOKEN"
+        tts_detail = f"{tts_state['provider']} 未配置凭据"
+        tts_hint = f"在 .env 里填 {missing} 后重启 API；未配置时课程自动切换为字幕推进模式"
     checks.append(
         {
-            "name": "语音服务（豆包 TTS）",
-            "status": "ok" if tts_ok else "degraded",
-            "detail": "已配置" if tts_ok else "未配置",
-            "hint": None if tts_ok else "未配置时课程自动切换为字幕推进模式",
+            "name": "语音服务（TTS）",
+            "status": tts_status,
+            "detail": tts_detail,
+            "hint": tts_hint,
         }
     )
     # 「GitHub 凭据」这一项的判据是**进程里实际用到的凭据**，不是"文件里写了没"：

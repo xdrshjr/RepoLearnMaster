@@ -96,6 +96,64 @@ GCM 弹窗会把 API 进程挂死。
 所以"任务被自己判死然后重复烧 token"这件事在当前实现里不会发生；如果你看到
 `attempts > 1`，那是进程真的退出过。
 
+## TTS（配音）排错
+
+### 0. 先看它到底有没有被调用
+
+```powershell
+.\.venv\Scripts\python.exe -m repolearn.cli doctor   # 「语音服务（TTS）」一行给出 provider / 音色
+```
+
+日志里两行是判据：
+
+| 日志事件 | 含义 |
+|---|---|
+| `tts_selected` | 这一轮生成选中了哪个 provider、`configured` 是否为真 |
+| `qwen_tts_failed` / `tts_circuit_open` | 合成失败；连续 3 次后整门课停止尝试 |
+
+课程数据的判据：`course.warnings` 里有且只有一条 `TTS_DEGRADED`，且
+`lesson.playback_meta.narration.no_voice_reason` 带着真实原因；前端课时页会直接把它显示出来。
+
+### 1. 凭据的唯一真源是 `.env`
+
+`REPOLEARN_TTS_PROVIDER` = `doubao`（火山）| `qwen`（阿里百炼兼容模式）| `none`。
+**`/setup` 第三步只做试听，不落库**——它不会把凭据写进 profile（那里只留
+`last_probe.tts=true`）。所以要么写在 `.env`，要么用课程 payload 显式覆盖。
+改 `.env` 之后必须重启 API（配置只在启动时读一次）。
+
+### 2. 火山引擎：只有 Access Token 不够
+
+`401 · 3001 grant not found in SaaS storage` 的真实含义是"这个 APP ID 没有对应的授权"，
+而把 appid 留空会得到 `app key not found in header`。也就是说 **APP ID 与 Access Token
+缺一不可**，两者都在控制台「语音技术 → 应用管理」里。实测：拿 token 当 appid 用、
+或随便填一个 appid，都会稳定返回同一个 `grant not found`（错误码不区分两种情况，
+所以别靠它猜）。
+
+### 3. 阿里百炼：`token-plan` 网关不支持 TTS（实测）
+
+同一个 key 的实测结果（2026-11-09，`token-plan.cn-beijing.maas.aliyuncs.com`）：
+
+| 请求 | 结果 |
+|---|---|
+| `GET /compatible-mode/v1/models` | 200，列表里有 `qwen-audio-3.0-tts-plus` |
+| `POST /compatible-mode/v1/chat/completions` + `qwen3.7-max` | 200（说明鉴权没问题） |
+| `POST /compatible-mode/v1/audio/speech` + tts 模型 | 400 `InvalidParameter: url error`（路由不可用） |
+| `POST /compatible-mode/v1/chat/completions` + `modalities:["audio"]` | 500 `InternalError: Unexpected error` |
+| `qwen-audio-3.0-realtime-plus` | 200，但响应体只有 `{"status_message":"Success."}`，没有 choices/audio |
+| `X-DashScope-Async: enable` | 403 `current user api does not support asynchronous calls` |
+| 同 key 打 `dashscope.aliyuncs.com` | 401 `InvalidApiKey` |
+
+结论：这个网关能跑文本模型，**不能出声**。要配音请换成标准百炼 `sk-` key
+（`https://dashscope.aliyuncs.com/compatible-mode/v1`）或补上火山 APP ID。
+
+### 4. 没有配音时的行为（这是设计，不是故障）
+
+合成失败 → 该步 `timing_source=estimated` → 字幕按 4.2 字/秒推进，
+课程照常发布；连续 3 次失败后整门课不再尝试（避免每个课时都去撞一次网关），
+并把原因写进 `TTS_DEGRADED` 与 `no_voice_reason`。
+
+---
+
 ## 3. 音频 / PDF
 
 | 症状 | 处理 |

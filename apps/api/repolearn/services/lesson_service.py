@@ -231,6 +231,8 @@ async def playback(session, course_id: str, key: str) -> PlaybackBundle:
         )
 
     trace = await _trace_for(session, course_id, lesson)
+    # 生成时若熔断了 TTS，原因写在 narration 里（见 nodes.synthesize_audio）。
+    no_voice_reason = narration.get("no_voice_reason")
     files = [
         FileRef(
             path=str(f.get("path", "")),
@@ -250,6 +252,7 @@ async def playback(session, course_id: str, key: str) -> PlaybackBundle:
         steps=step_bundles,
         files=files,
         trace=trace,
+        no_voice_reason=str(no_voice_reason) if no_voice_reason else None,
     )
 
 

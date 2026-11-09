@@ -333,7 +333,10 @@ async def publish(
         for s in sections
     ]
     course.quality_report = quality.as_dict()
-    course.warnings = list(warnings) + list(course.warnings or [])
+    # **替换**而不是累加：`warnings` 已经是整轮 state 的汇总，累加只会把
+    # 上一轮已经修好的告警永远留在列表里（实测三轮后涨到 144 条，
+    # 前端只看前 6 条 → 用户看到的是几轮之前的旧问题）。
+    course.warnings = list(warnings)
     course.lesson_count = len(lesson_docs)
     course.total_minutes = sum(int(doc.get("minutes", 0) or 0) for doc in lesson_docs)
     course.status = status
@@ -646,7 +649,10 @@ async def publish_partial(
     }
     course.sections = merged_sections
     course.quality_report = quality_dict
-    course.warnings = list(warnings) + list(course.warnings or [])
+    # **替换**而不是累加：`warnings` 已经是整轮 state 的汇总，累加只会把
+    # 上一轮已经修好的告警永远留在列表里（实测三轮后涨到 144 条，
+    # 前端只看前 6 条 → 用户看到的是几轮之前的旧问题）。
+    course.warnings = list(warnings)
     course.lesson_count = merged_total
     course.total_minutes = sum(int(row.minutes or 0) for row in copied_rows if row.key in copied_keys) + sum(
         int(doc.get("minutes", 0) or 0) for doc in lesson_docs

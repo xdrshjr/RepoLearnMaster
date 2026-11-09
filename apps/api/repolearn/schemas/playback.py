@@ -116,3 +116,6 @@ class PlaybackBundle(BaseModel):
     steps: list[StepBundle] = Field(default_factory=list)
     files: list[FileRef] = Field(default_factory=list)
     trace: TraceOut | None = None
+    #: 为什么这一课没有配音（TTS 未配置 / 凭据错 / 网关不支持…）。
+    #: 没有它，前端只能显示"本节暂无配音"，用户无法区分"我没配"和"配错了"。
+    no_voice_reason: str | None = None

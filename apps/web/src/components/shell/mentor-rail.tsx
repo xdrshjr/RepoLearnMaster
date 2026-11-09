@@ -123,7 +123,16 @@ export function MentorRail({
         ) : null}
 
         {step?.timingSource === 'estimated' ? (
-          <Badge tone="warn">本节无配音 · 字幕自动推进</Badge>
+          <div className="space-y-1">
+            <Badge tone="warn">本节无配音 · 字幕自动推进</Badge>
+            {playback?.no_voice_reason ? (
+              // 有 TTS 但没合成成功时，把真实原因显示出来：只说"无配音"会让用户
+              // 分不清"我没配"和"配错了 / 网关不支持"（2026-11-09 实测踩到）。
+              <p className="break-words text-[10px] leading-[1.5] text-text-dim" title={playback.no_voice_reason}>
+                原因：{playback.no_voice_reason}
+              </p>
+            ) : null}
+          </div>
         ) : null}
       </div>
 

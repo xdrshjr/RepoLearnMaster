@@ -104,10 +104,20 @@ class Settings(BaseSettings):
     vision_qa: bool = False
     pdf_default_engine: str = "chromium"
 
+    #: TTS 实现：doubao（火山）| qwen（阿里百炼兼容模式）| none（强制字幕模式）
+    tts_provider: str = "doubao"
+
     doubao_app_id: str = ""
     doubao_access_token: str = ""
     doubao_cluster: str = "volcano_tts"
     doubao_voice_type: str = "zh_female_wanwanxiaohe_moon_bigtts"
+
+    #: 阿里百炼（DashScope）兼容模式：`https://…/compatible-mode/v1`
+    qwen_api_key: str = ""
+    qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    qwen_tts_model: str = "qwen-tts"
+    qwen_tts_voice: str = "Cherry"
+    qwen_tts_format: str = "mp3"
 
     api_base: str = "http://127.0.0.1:8000"
     web_mock: bool = False
