@@ -154,6 +154,37 @@ export function PrepareView({ owner, name }: { owner: string; name: string }) {
   const isReady = course?.status === 'ready' || course?.status === 'partial' || state.completed;
   const isLoading = coursesQuery.isLoading || (Boolean(jobId) && jobQuery.isLoading && !state.completed);
 
+  // "还在生成"必须由**任务状态**决定，不能由"页面上有个 jobId"决定：命中缓存时
+  // 也会带 jobId（后端返回的是已完成的任务），而课程页在没有任务时什么都没有。
+  const jobRunning = jobQuery.data ? ACTIVE_STATUSES.has(jobQuery.data.status) : Boolean(jobId);
+  const livePreparation = Boolean(jobId) && !state.completed && jobRunning;
+
+  // **已发布的课时数**才是"这门课到底成没成"的依据。
+  //
+  // 曾经的写法拿 `sections.length` 当已发布段数，而 `sections` 是**计划**（4 章
+  // 12 课时的骨架），于是"12 个课时全部生成失败、一门课一个课时都没有"的课程
+  // 会被画成"四段全部完成 + 已完成 ×4 + 课程可学习"（2026-11-09 真机复现）。
+  // `blueprint.lessons` 是发布时写入的实际课时数，`quality_report.lesson_completeness`
+  // 是发布时的自评，两者才是真值。
+  const blueprint = (courseDetail.data?.blueprint ?? {}) as { lessons?: number; sections?: number };
+  const publishedLessons = Number(blueprint.lessons ?? 0);
+  const completeness = Number(
+    (courseDetail.data?.quality_report as { lesson_completeness?: number } | undefined)?.lesson_completeness ?? 0,
+  );
+  const degraded = Boolean((courseDetail.data?.quality_report as { degraded?: boolean } | undefined)?.degraded);
+  const courseStatus = course?.status ?? courseDetail.data?.status ?? '';
+  const courseFailed = courseStatus === 'failed' || courseStatus === 'failed_budget';
+  // 零课时就是零课时——不管课程行是 ready / partial / failed：
+  // 只要它存在却没有任何课时，"生成失败 + 能点的重生成"都必须成立。
+  const courseEmpty = !livePreparation && Boolean(course) && publishedLessons === 0;
+  const finishedWithoutJob = !livePreparation && publishedLessons > 0 && completeness >= 0.9;
+  const publishedSections = state.completed ? 4 : Math.min(4, Math.round(4 * Math.min(1, completeness)));
+  // 降级、零课时、覆盖率不达标、课程行失败，都要给一个**能点的**重生成入口：
+  // 模板课的 summary 里写着"可以点「重新生成」"，而按钮只在 `state.error` 时出现时
+  // 就是空头支票（实测：回滚后的 failed 课程在页面上没有任何办法重跑）。
+  const needsRebuild =
+    degraded || courseEmpty || courseFailed || (publishedLessons > 0 && completeness < 0.9);
+
   return (
     <main id="main" className="mx-auto w-full max-w-[1100px] space-y-4 px-4 py-6">
       <header className="flex flex-wrap items-start justify-between gap-3">
@@ -162,10 +193,16 @@ export function PrepareView({ owner, name }: { owner: string; name: string }) {
             <GitBranch className="size-4 text-text-dim" aria-hidden />
             <h1 className="truncate text-lg font-semibold text-text">{fullName}</h1>
             <Badge
-              tone={isReady ? 'accent' : state.error ? 'danger' : 'warn'}
+              tone={isReady && !courseEmpty ? 'accent' : state.error || courseEmpty ? 'danger' : 'warn'}
               className="shrink-0"
             >
-              {isReady ? '课程可学习' : state.error ? '生成失败' : '生成中'}
+              {state.error || (courseFailed && !livePreparation)
+                ? '生成失败'
+                : courseEmpty
+                  ? '课程不完整'
+                  : isReady
+                    ? '课程可学习'
+                    : '生成中'}
             </Badge>
           </div>
           <p className="mt-1 text-xs text-text-muted">
@@ -225,6 +262,9 @@ export function PrepareView({ owner, name }: { owner: string; name: string }) {
             cost={jobQuery.data?.cost}
             onCancel={jobId ? cancelJob : undefined}
             cancelling={cancelling}
+            live={livePreparation}
+            finished={finishedWithoutJob}
+            publishedSections={publishedSections}
           />
 
           {state.error ? (
@@ -248,6 +288,37 @@ export function PrepareView({ owner, name }: { owner: string; name: string }) {
                       className="inline-flex h-8 items-center rounded-[var(--radius-sm)] px-2 text-[11px] text-accent underline underline-offset-2"
                     >
                       打开诊断面板
+                    </Link>
+                  </div>
+                </div>
+              </div>
+            </Card>
+          ) : null}
+
+          {!state.error && needsRebuild ? (
+            <Card className="border-warn/40 bg-warn/5">
+              <div className="flex items-start gap-2">
+                <TriangleAlert className="mt-0.5 size-4 shrink-0 text-warn" aria-hidden />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-medium text-warn">
+                    {courseEmpty ? '这门课还没生成出任何课时' : degraded ? '这门课是简化版' : '这门课不完整'}
+                  </p>
+                  <p className="mt-1 text-xs text-text-muted">
+                    {courseEmpty
+                      ? '上一次生成把每个课时都判成了失败（预算或模型问题），课程目前是空壳。看诊断面板确认配置，然后重跑一次。'
+                      : degraded
+                        ? '生成时 Agent 内核不可用或预算耗尽，讲解来自静态分析模板（真实符号与行号，但不是模型写的）。现在内核可用的话，点下面的按钮重跑一次即可拿到完整版。'
+                        : `已发布 ${publishedLessons} 个课时，未达到"完整课程"的门槛。可以重跑缺失的部分。`}
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <Button variant="outline" size="sm" onClick={rebuild}>
+                      重新生成
+                    </Button>
+                    <Link
+                      href="/settings#doctor"
+                      className="inline-flex h-8 items-center rounded-[var(--radius-sm)] px-2 text-[11px] text-accent underline underline-offset-2"
+                    >
+                      先看诊断面板
                     </Link>
                   </div>
                 </div>

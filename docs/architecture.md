@@ -78,7 +78,7 @@ N1 normalize_repo → N2 resolve_commit → N3 fetch_repo → N4 analyze_repo
 
 | 层 | 默认 | 闸门位置 | 超限 |
 |---|---|---|---|
-| Job | 2,000k tokens / 50 USD / 25 分钟 | `budget_guard.JobBudget`（runner 持有） | `failed_budget`，已发布课时保留 |
+| Job | 3,000k tokens / 50 USD / 25 分钟 | `budget_guard.JobBudget`（runner 持有） | `failed_budget`，已发布课时保留 |
 | 节点 | N5 200k、N6 每课时 120k、N7 每课时 20k，预留 400k 给重试 | 每次 Kernel 调用前下发 | 只让该课时失败 |
 | Run | 跟随节点下发（20k–200k），`maxTurns=16` | Kernel `budget.ts`（绝对天花板 4,000k） | Kernel 主动 abort 并回 `budget.exceeded` |
 

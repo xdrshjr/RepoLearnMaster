@@ -128,6 +128,17 @@ def outline(text: str, path: str) -> OutlineResult:
     if lang not in _PATTERNS:
         return OutlineResult(file=path, lang=lang, symbols=[], degraded=True, reason="unsupported language")
     lines = text.split("\n")
+    # **末尾换行不是"多出来的一行"**：`"a\nb\n".split("\n")` 会得到 `["a","b",""]`，
+    # 于是 `len(lines)` 比真实行数多 1，`_ends_of` 的 `candidate` 就能取到 `total+1`。
+    #
+    # 真实故障（2026-11-09，job job_01M6ZHWQQZTDQ27N5JB5HNBWD8）：5 个锚点的
+    # `line_end` 恰好是 `总行数 + 1`（如 `notify.py:283`，文件只有 282 行），
+    # 发布前的锚点校验（`check_anchors`，它按 `mirror_line_count` 判）直接拒绝，
+    # 整门课回滚 —— 12 个课时、160 万 tokens 的产出因为一个差一错误全丢。
+    # 差一错误还会一路传到讲解的 `focus` 区间与前端高亮。
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+
     hits: list[tuple[int, str, str, str]] = []
     for i, line in enumerate(lines, start=1):
         if len(line) > 400:

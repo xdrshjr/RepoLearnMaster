@@ -85,7 +85,7 @@ GCM 弹窗会把 API 进程挂死。
 | 课程一直是「生成中」 | API 在 N9 前重启过，`generating` 版本没收敛 | 重启 API：reaper 启动时会把它置 `failed` 并释放 `generation_locks`；或 `cli requeue-stale` |
 | Job 卡在 `running` 但没进度 | 心跳停了（进程被杀/挂死） | `cli requeue-stale`（阈值 `REPOLEARN_JOB_STALE_SECONDS`，默认 90s） |
 | 课程 `partial` | 部分课时失败 / 锚点覆盖率 < 80% / 章节不全 | 正常降级结果；看 `course.quality_report.reasons`，可点「重新生成」 |
-| `failed_budget` | 超 job 级预算（默认 2,000k tokens / 50 USD / 25 分钟）；错误提示里会写明是哪一档、对应哪个环境变量 | 提高 `.env` 的 `REPOLEARN_JOB_MAX_TOKENS` / `REPOLEARN_JOB_MAX_USD` / `REPOLEARN_JOB_DEADLINE_MS`（改完重启 API），或收敛课程规模；已生成课时仍可读 |
+| `failed_budget` | 超 job 级预算（默认 3,000k tokens / 50 USD / 25 分钟）；错误提示里会写明是哪一档、对应哪个环境变量 | 提高 `.env` 的 `REPOLEARN_JOB_MAX_TOKENS` / `REPOLEARN_JOB_MAX_USD` / `REPOLEARN_JOB_DEADLINE_MS`（改完重启 API），或收敛课程规模；已生成课时仍可读 |
 | `CONTRACT_VIOLATION` | 模型产出连续两次不合 schema | 换更强的模型（设置 → 角色），或降低课时数 |
 | 课程内容明显是"简化版" | Agent 内核不可用（状态 C） | `pnpm -C services/agent-kernel install`；`cli doctor` 看 G1 |
 | 锚点行号对不上 | 分析降级（无 tree-sitter），或 commit 变了 | `pip install tree-sitter-language-pack`；或重建课程 |

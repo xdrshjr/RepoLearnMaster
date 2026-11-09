@@ -558,12 +558,16 @@ async def resolve_commit(ref: RepoRef, branch: str, wanted_ref: str | None = Non
         )
     commit = data.get("commit") or {}
     author = (commit.get("author") or {}) if isinstance(commit, dict) else {}
-    files = data.get("files") or []
     out = CommitMeta(
         sha=sha,
         committed_at=author.get("date") if isinstance(author, dict) else None,
         message=str(commit.get("message", ""))[:400] if isinstance(commit, dict) else "",
-        file_count=len(files) if isinstance(files, list) else 0,
+        # **不要**从 `data["files"]` 推文件数：这个端点返回的 `files` 是"这个 commit
+        # 改动过的文件"（而且可能被分页截断），不是仓库的文件数。
+        # 真实表现：sherlock 的 HEAD 只改了一个文件，于是课程页写着
+        # `commit c588d7c8 · 1 个文件`，而镜像里其实有 51 个文件。
+        # 真值只有一处——N3 手上的镜像清单，由 `_Ctx.persist_commit_file_count` 写回。
+        file_count=0,
         # `html_url` 同样要清洗：它可能被前端渲染。
         extra={"html_url": safe_html_url(data.get("html_url"), full_name=ref.full_name)},
     )

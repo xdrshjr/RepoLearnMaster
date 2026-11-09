@@ -224,7 +224,16 @@ export async function proxyRequest(request: NextRequest, options: ProxyOptions):
   if (isMockMode() && wantsStream) headers.set('x-repolearn-mock', '1');
 
   // `/setup/commit` success → write the first-run guard cookie (§3.6.1 rule 1).
-  if (isSetupCommitSuccess(request, options, upstream)) {
+  // `/setup/state` 是**自愈点**（spec §3.6.1 规则 1）：它自己的响应体就写着
+  // "是否还缺配置"，因此 `required: false` 时必须顺手补写首启守卫 cookie。
+  //
+  // 没有这一步，"用户清了一次浏览器数据"就是一个**不可恢复的死循环**：
+  // 中间件没有 cookie → 所有页面 307 到 /setup → /setup 调本接口看到"已配置完成"
+  // → 页面只剩「回首页」按钮 → 首页又 307 回 /setup。cookie 只有
+  // `POST /setup/commit` 会写，而配置已经完成时用户根本没有第二次提交的机会。
+  const heal = await healSetupCookieFromState(request, options, upstream);
+
+  if (heal.cookie || isSetupCommitSuccess(request, options, upstream)) {
     const secure = request.nextUrl.protocol === 'https:' ? '; Secure' : '';
     headers.append(
       'set-cookie',
@@ -232,11 +241,35 @@ export async function proxyRequest(request: NextRequest, options: ProxyOptions):
     );
   }
 
-  return new Response(pipeBody(upstream), {
+  return new Response(heal.body ?? pipeBody(upstream), {
     status: upstream.status,
     statusText: upstream.statusText,
     headers,
   });
+}
+
+/**
+ * `GET /setup/state` 回答 `required: false` 即"本实例已配置"，这正是中间件 cookie
+ * 所编码的事实，于是 `cookie: true` 要求调用方补写它；`body` 是为了读 `required`
+ * 而缓冲的原响应体（`/v1/setup/state` 只有几百字节 JSON，缓冲不会变成文件头注释里
+ * 警告的"把 30 秒 SSE 揉成一坨"）。
+ */
+async function healSetupCookieFromState(
+  request: NextRequest,
+  options: ProxyOptions,
+  upstream: Response,
+): Promise<{ cookie: boolean; body: BodyInit | null }> {
+  if (request.method !== 'GET') return { cookie: false, body: null };
+  if (options.segments.join('/') !== 'setup/state') return { cookie: false, body: null };
+  if (upstream.status !== 200) return { cookie: false, body: null };
+  const text = await upstream.text();
+  try {
+    const parsed = JSON.parse(text) as { required?: unknown };
+    return { cookie: parsed.required === false, body: text };
+  } catch {
+    // 读不懂就当"没配置完"：宁可不写 cookie，也不能在解析失败时放行。
+    return { cookie: false, body: text };
+  }
 }
 
 function isSetupCommitSuccess(

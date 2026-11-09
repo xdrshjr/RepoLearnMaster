@@ -26,7 +26,13 @@ from repolearn.core.logging import get_logger
 from repolearn.ingest import fetch_and_mirror, mirror_stat
 from repolearn.ingest.mirror import line_count as mirror_line_count
 from repolearn.ingest.mirror import list_files, read_file
-from repolearn.workflow.parsing import check_curriculum, check_quiz, check_segments
+from repolearn.providers.base import WRITER_AGENT_TOOLS
+from repolearn.workflow.parsing import (
+    check_curriculum,
+    check_lesson_anchors,
+    check_quiz,
+    check_segments,
+)
 from repolearn.workflow.prompts import (
     critic_prompt,
     critic_system,
@@ -43,10 +49,24 @@ from repolearn.workflow.template import build_template_curriculum, build_templat
 log = get_logger("nodes")
 
 LESSON_CONCURRENCY = 3
+#: 为什么这个"3"必须落在**节点入口**而不是只落在 `_write_all` 里：
+#:
+#: 图是用 `Send` 按课时扇出的（见 `course_graph.fan_out_lessons`）：12 个课时 →
+#: **12 个并发的 `write_lessons` 节点调用**，每个调用只写一个课时，根本走不到
+#: `_write_all` 里那把信号量。结果是一次真实生成会同时向内核发起 12 路 run，
+#: 而内核对并发有硬上限（`MAX_CONCURRENT_RUNS=8`，超出返回 429 KERNEL_BUSY）。
+#:
+#: 真实故障（2026-11-09 浏览器实测，连续三次）：课程每跑到"写课时"就整个失败，
+#: job 终态 `PROVIDER_UNAVAILABLE · KERNEL_BUSY`，12 个课时一个都没留下。
+#: 所以闸门放在 `write_lessons` 入口，两条路径（扇出与顺序）共用它。
 
 
 def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
     """把 9 个节点绑定到注入的上下文上。"""
+
+    # 每个图/job 一把闸：同一个 `make_nodes` 产生的所有节点调用共享它，
+    # 这正是 `Send` 扇出需要的共享语义（12 个并发节点调用 → 最多 3 路真并发）。
+    lesson_gate = asyncio.Semaphore(LESSON_CONCURRENCY)
 
     async def _emit(node: str, percent: int | None = None) -> None:
         result = ctx.emit_progress(node, percent or 0)
@@ -116,6 +136,11 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
         files = list_files(sha)
         if not files:
             raise AppError("PROVIDER_UNAVAILABLE", "镜像为空，无法分析", retryable=True)
+        # 写回真实文件数：`resolve_commit` 拿不到它（commits 端点的 `files` 是"本次
+        # commit 改动过的文件"），镜像清单才是真值。放在 `if not files` 之后，是为了
+        # 让"镜像坏了"这条路径保持原样失败，而不是先写一个 0。
+        if hasattr(ctx, "persist_commit_file_count"):
+            await ctx.persist_commit_file_count(len(files))
         return {
             "mirror_dir": str(info.path),
             "tree": prune_tree(files),
@@ -154,7 +179,6 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
 
         if ctx.runtime_mode == "template":
             # 状态 C：模板降级（不尝试 exec，不假装模型生成了东西）
-            from repolearn.analysis.knowledge_graph import KnowledgeGraph
 
             sha = str((state.get("commit") or {}).get("sha", ""))
             kg_obj = _rehydrate_kg(state, sha, ctx)
@@ -175,16 +199,15 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
         async def run(system: str, prompt: str) -> tuple[str, dict]:
             return await ctx.run("planner", system, prompt, node="plan_curriculum", schema="course")
 
-        outcome = await produce_validated(
-            run=run,
-            system=planner_system(),
-            prompt=planner_prompt(repo, kg, anchors, chains),
-            schema_name="course",
-            extra_checks=check_curriculum,
-        )
-        if not outcome.ok:
-            # 修复 2 次仍失败 → 退化为确定性模板（spec §3.4 N5 失败策略）
-            from repolearn.analysis.knowledge_graph import KnowledgeGraph  # noqa: F401
+        def _template(reason: str) -> dict:
+            """N5 的**唯一**兜底出口：确定性模板（spec §3.4 N5 失败策略）。
+
+            两条失败路径必须走同一个出口：结构契约修不好（`outcome.ok=False`）与
+            预算耗尽（`ctx.run` 抛 `BUDGET_EXCEEDED`）。早期只接了前者，后者一路
+            冒到 runner 把**整门课**置成 `failed_budget`——用户看到"生成失败"，
+            而按设计这里本该交付一份简化版课程（真实符号、真实行号，只是讲解浅）。
+            预算是一次"这次讲不了那么多"的信号，不是"这门课不该存在"的信号。
+            """
 
             sha = str((state.get("commit") or {}).get("sha", ""))
             kg_obj = _rehydrate_kg(state, sha, ctx)
@@ -195,12 +218,28 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
                 "warnings": [
                     {
                         "code": "CURRICULUM_FALLBACK",
-                        "message": f"课程骨架多次不满足结构契约，已退化为确定性模板：{'; '.join(outcome.errors[:3])}",
+                        "message": reason,
                         "severity": "warning",
                         "node": "plan_curriculum",
                     }
                 ],
             }
+
+        try:
+            outcome = await produce_validated(
+                run=run,
+                system=planner_system(),
+                prompt=planner_prompt(repo, kg, anchors, chains),
+                schema_name="course",
+                extra_checks=check_curriculum,
+            )
+        except AppError as exc:
+            if exc.code != "BUDGET_EXCEEDED":
+                raise
+            return _template(f"规划阶段预算耗尽，已退化为确定性模板（{exc.message}）")
+
+        if not outcome.ok:
+            return _template(f"课程骨架多次不满足结构契约，已退化为确定性模板：{'; '.join(outcome.errors[:3])}")
         curriculum = dict(outcome.data)
         curriculum["_usage"] = outcome.usage
         return {"curriculum": curriculum, "warnings": []}
@@ -212,7 +251,32 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
         if not lesson_plan:
             # 顺序执行路径：一次性处理全部课时
             return await _write_all(state)
-        return await _write_one(state, lesson_plan)
+        # 扇出路径：这里也必须过闸，否则 12 个 Send 分支会同时打内核（见 LESSON_CONCURRENCY）
+        async with lesson_gate:
+            try:
+                return await _write_one(state, lesson_plan)
+            except Exception as exc:  # noqa: BLE001
+                # **扇出路径同样要隔离单课时失败**（图路径没有 `_write_all` 那层 try）。
+                #
+                # 真实故障（2026-11-09 浏览器实测，job job_01M6ZE5PWRJ2Z0ZK7HPQA2F0A0）：
+                # 11 个课时生成成功，第 12 个撞上节点 token 分闸，异常从 LangGraph 节点
+                # 直接穿到 `graph.ainvoke` → **整门课 failed**，已生成的 11 个课时白写。
+                # 用户看到的是一句"预算耗尽"，而它本该是一门 partial 课程。
+                key = str(lesson_plan.get("key", ""))
+                log.warning("lesson_failed", key=key, error=str(exc)[:300])
+                return {
+                    "lessons": {},
+                    "quizzes": {},
+                    "failed_lessons": [key],
+                    "warnings": [
+                        {
+                            "code": "LESSON_FAILED",
+                            "message": f"课时 {key} 生成失败：{exc}",
+                            "severity": "warning",
+                            "node": "write_lessons",
+                        }
+                    ],
+                }
 
     async def _write_all(state: dict) -> dict:
         lessons = [
@@ -224,7 +288,7 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
         merged_quizzes: dict[str, Any] = {}
         failed: list[str] = []
         warnings: list[dict] = []
-        semaphore = asyncio.Semaphore(LESSON_CONCURRENCY)
+        semaphore = lesson_gate
 
         async def worker(plan: dict) -> tuple[dict, dict, list[dict], str | None]:
             async with semaphore:
@@ -252,7 +316,35 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
                         str(plan.get("key", "")),
                     )
 
-        results = await asyncio.gather(*(worker(p) for p in lessons)) if lessons else []
+        # `return_exceptions=True` 不是可选项：`except Exception` 接不住
+        # `CancelledError` / `KeyboardInterrupt` 这类 BaseException，而 `gather`
+        # 默认会把**第一个**抛出的异常直接穿透出去 —— 于是"单课时失败不阻塞整体"
+        # 这句注释在某一个课时被取消时就会变成谎话，整门课跟着作废
+        # （2026-11-09 实测：内核对并发的课时返回 429，整个 job 以
+        #  PROVIDER_UNAVAILABLE 结束，12 个课时一个都没留下）。
+        raw_results = await asyncio.gather(*(worker(p) for p in lessons), return_exceptions=True) if lessons else []
+        results: list[tuple[dict, dict, list[dict], str | None]] = []
+        for plan, item in zip(lessons, raw_results, strict=False):
+            if isinstance(item, BaseException):
+                key = str(plan.get("key", ""))
+                log.warning("lesson_crashed", key=key, error=str(item)[:300])
+                results.append(
+                    (
+                        {},
+                        {},
+                        [
+                            {
+                                "code": "LESSON_FAILED",
+                                "message": f"课时 {key} 生成中断：{item}",
+                                "severity": "warning",
+                                "node": "write_lessons",
+                            }
+                        ],
+                        key,
+                    )
+                )
+            else:
+                results.append(item)
         for lessons_update, quizzes_update, warns, failed_key in results:
             merged_lessons.update(lessons_update)
             merged_quizzes.update(quizzes_update)
@@ -269,8 +361,16 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
     async def _write_one(state: dict, plan: dict) -> dict:
         key = str(plan.get("key", ""))
         sha = str((state.get("commit") or {}).get("sha", ""))
-        files = [{"path": f.get("path"), "lang": f.get("lang")} for f in list_files(sha)[:40]]
+        all_files = list_files(sha)
+        # 给模型的清单只取前 40 个（prompt 预算），但**锚点校验必须看全部文件**：
+        # 拿截断后的清单当真值，会把真实存在的文件判成"锚点文件不存在"
+        # （2026-11-09 实测：`sherlock_project/sites.py` 排在第 40 个之后，于是
+        # 所有讲它的课时都被打回，模型反复重试到轮数耗尽）。
+        files = [{"path": f.get("path"), "lang": f.get("lang")} for f in all_files[:40]]
         anchors = _anchors_from_artifact(state.get("knowledge_graph") or {}, ctx)
+        file_lines = {
+            str(f["path"]): ctx.line_count(str(f["path"])) for f in all_files if f.get("path")
+        }
 
         if ctx.runtime_mode == "template" or state.get("runtime") == "template":
             kg_obj = _rehydrate_kg(state, sha, ctx)
@@ -294,7 +394,16 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
 
         async def run(system: str, prompt: str) -> tuple[str, dict]:
             return await ctx.run(
-                "writer", system, prompt, node="write_lessons", schema="lesson", lesson_key=key, per_lesson=True
+                "writer",
+                system,
+                prompt,
+                node="write_lessons",
+                schema="lesson",
+                lesson_key=key,
+                per_lesson=True,
+                # 只给"看结构"的工具：通读文件会把上下文和 token 一起放大，
+                # 而锚点（N4 产出、N7 复核）已经带了精确行区间。
+                tools=WRITER_AGENT_TOOLS,
             )
 
         outcome = await produce_validated(
@@ -302,7 +411,11 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
             system=writer_system(),
             prompt=writer_prompt({**plan, "layer": _layer_of(state, key)}, files, anchors, None),
             schema_name="lesson",
-            extra_checks=lambda data: check_segments(data.get("steps") or []) + check_quiz(data.get("quiz") or []),
+            extra_checks=lambda data: (
+                check_segments(data.get("steps") or [])
+                + check_quiz(data.get("quiz") or [])
+                + check_lesson_anchors(data, file_lines)
+            ),
         )
         if not outcome.ok:
             raise AppError("CONTRACT_VIOLATION", f"课时 {key} 产出不合契约：{'; '.join(outcome.errors[:3])}")
@@ -342,22 +455,43 @@ def make_nodes(ctx: Any) -> dict[str, Callable[[dict], Any]]:
                         "critic", system, prompt, node="simulate_trace", schema="trace", lesson_key=_key, per_lesson=True
                     )
 
-                outcome = await produce_validated(
-                    run=run,
-                    system=critic_system(),
-                    prompt=critic_prompt(chain, {"key": key, "ref": lesson_ref}, lesson_ref.get("anchors") or []),
-                    schema_name="trace",
-                )
-                trace = outcome.data if outcome.ok else template_trace(chain, key)
-                if not outcome.ok:
+                # 预算是**跨节点共享**的：课时写完之后，轨迹阶段可能只剩 1k 额度。
+                # 真实故障（2026-11-09，job job_01M6ZFHM3PJJ1NSDNMR1AT61MN）：12 个课时
+                # 全部写成功，轨迹阶段 `tokens used=4297 limit=1000` 抛 BUDGET_EXCEEDED，
+                # 整门课被判 failed_budget —— 已经写好的 12 个课时一个都没发布。
+                # 轨迹本来就是"可降级项"（模型推演 vs 静态调用链），所以预算耗尽必须和
+                # "结构契约不通过"走同一个出口：用静态轨迹 + 一条警告，课程照常发布。
+                try:
+                    outcome = await produce_validated(
+                        run=run,
+                        system=critic_system(),
+                        prompt=critic_prompt(chain, {"key": key, "ref": lesson_ref}, lesson_ref.get("anchors") or []),
+                        schema_name="trace",
+                    )
+                except AppError as exc:
+                    if exc.code != "BUDGET_EXCEEDED":
+                        raise
+                    log.warning("trace_budget_fallback", lesson_key=key, error=exc.message[:200])
+                    trace = template_trace(chain, key)
                     warnings.append(
                         {
                             "code": "TRACE_FALLBACK",
-                            "message": f"课时 {key} 的轨迹生成失败，已用静态调用链替代",
+                            "message": f"课时 {key} 的轨迹因预算耗尽改用静态调用链（内容仍可学）",
                             "severity": "warning",
                             "node": "simulate_trace",
                         }
                     )
+                else:
+                    trace = outcome.data if outcome.ok else template_trace(chain, key)
+                    if not outcome.ok:
+                        warnings.append(
+                            {
+                                "code": "TRACE_FALLBACK",
+                                "message": f"课时 {key} 的轨迹生成失败，已用静态调用链替代",
+                                "severity": "warning",
+                                "node": "simulate_trace",
+                            }
+                        )
             guarded = guard_trace(trace, lambda p: mirror_line_count(sha, p), lesson_key=key)
             warnings.extend(guarded.warnings)
             payload = {"key": guarded.summary and trace.get("key") or f"trace_{key}", "steps": guarded.steps}

@@ -15,6 +15,7 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass, field
 
+from repolearn.analysis.paths import is_test_path
 from repolearn.analysis.symbols import Symbol
 
 
@@ -94,10 +95,16 @@ def build_call_graph(symbols: list[Symbol]) -> CallGraph:
     entrypoints = [
         s.name
         for s in symbols
-        if any(h in s.name.lower() for h in ENTRY_HINTS) and in_deg.get(s.name, 0) <= 1
+        if any(h in s.name.lower() for h in ENTRY_HINTS)
+        and in_deg.get(s.name, 0) <= 1
+        and not is_test_path(s.file)
     ]
     if not entrypoints:
-        entrypoints = [s.name for s in sorted(symbols, key=lambda s: in_deg.get(s.name, 0))[:3]]
+        # 回退时同样要排除测试文件：sherlock 的实测结果是入口点变成了
+        # `TestLiveTargets` / `Test_All_Targets`（"被调用最少"的那几个），
+        # 于是模板课把测试类当成"这门课的入口"讲给学习者。
+        candidates = [s for s in symbols if not is_test_path(s.file)] or symbols
+        entrypoints = [s.name for s in sorted(candidates, key=lambda s: in_deg.get(s.name, 0))[:3]]
 
     return CallGraph(
         edges=edges,

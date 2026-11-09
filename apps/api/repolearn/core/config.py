@@ -90,7 +90,12 @@ class Settings(BaseSettings):
     #: `plan_curriculum` 节点分闸只有 20k，真实仓库单次规划就用到 30k+，
     #: 课程在 N5 就 `failed_budget`。两档一起放宽后，"跑一门课"不再因为
     #: 预算而在中段死掉；要收紧时改这里（或 `REPOLEARN_JOB_MAX_TOKENS`）。
-    job_max_tokens: int = 2_000_000
+    #: 2026-11-09 实战复测再抬到 3_000_000：一门 12 课时的真实课程实测成本是
+    #:   规划 ~50k + 12 × 课时 150–200k（含 emit 的 JSON 正文）+ 12 × 轨迹 ~10k ≈ 2.5M，
+    #: 2M 的默认值会让每一门正常课程都在最后几个课时或轨迹阶段撞闸。
+    #: 这不是给放大器换桶：每课时的 token 分闸（NODE_BUDGETS）与轮数
+    #: （NODE_MAX_TURNS）仍然各自生效，这里只是把总闸放到一门课真能跑完的量级。
+    job_max_tokens: int = 3_000_000
     job_max_usd: float = 50.0
     heartbeat_seconds: int = 15
     job_stale_seconds: int = 90

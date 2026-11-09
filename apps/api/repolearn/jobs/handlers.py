@@ -11,6 +11,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from sqlalchemy import update
+
 from repolearn.core.clock import utcnow
 from repolearn.core.config import settings
 from repolearn.core.db import session_scope
@@ -19,9 +21,9 @@ from repolearn.core.ids import new_id
 from repolearn.core.logging import get_logger
 from repolearn.ingest.mirror import line_count as mirror_line_count
 from repolearn.ingest.mirror import list_files, mirror_path, read_file
-from repolearn.models import CourseVersion
+from repolearn.models import Commit, CourseVersion
 from repolearn.providers.agent_runtime import refresh_state
-from repolearn.providers.base import AgentBudget, AgentRunRequest
+from repolearn.providers.base import DEFAULT_AGENT_TOOLS, AgentBudget, AgentRunRequest
 from repolearn.providers.budget_guard import JobBudget, estimate_tokens, usd_for
 from repolearn.providers.registry import build_resolver
 from repolearn.providers.tts.doubao import DoubaoTts, TtsConfigIn
@@ -72,6 +74,7 @@ class _Ctx:
         self.runtime_mode = runtime_mode
         self._emit = emit
         self.sha = ""
+        self._line_counts: dict[tuple[str, str], int] = {}
 
     # ---- 模型调用 --------------------------------------------------------
     async def run(self, role: str, system: str, prompt: str, **kwargs: Any) -> tuple[str, dict]:
@@ -80,10 +83,16 @@ class _Ctx:
         `node=` 决定节点级额度（`NODE_BUDGETS` 的键是**节点名**），
         `schema=` 只用于让 Kernel 做结构化产出的校验。两者混用会让每个节点都
         落回 8k 默认值：`plan_curriculum` 该拿 20k、`simulate_trace` 只该拿 2k。
+
+        `tools=` 用来按节点收窄**只读仓库工具**（不给就等于全给）。写课时不需要
+        通读文件——锚点在 N4 已经带着精确行号核验过，而一次 `repo_read_file`
+        会把之后每一轮的上下文都撑大（实测单课时因此烧掉 155k tokens 却一个字的
+        讲解都没产出）。收窄到 `repo_file_outline` / `repo_grep` 就够核对。
         """
         chain = self.resolver.resolve(role)
         node = str(kwargs.get("node") or role)
         per_lesson = bool(kwargs.get("per_lesson"))
+        tools = kwargs.get("tools") or DEFAULT_AGENT_TOOLS
         max_tokens = self.budget.node_allowance(node, per_lesson=per_lesson)
         self.budget.check()
         last_error: Exception | None = None
@@ -95,10 +104,10 @@ class _Ctx:
                 config=candidate.config,
                 system_prompt=system,
                 prompt=prompt,
-                tools=["repo_list_tree", "repo_read_file", "repo_grep", "repo_file_outline"],
+                tools=list(tools),
                 schema_ref=kwargs.get("schema"),
                 budget=AgentBudget(
-                    max_turns=16,
+                    max_turns=self.budget.node_max_turns(node),
                     max_tokens=max_tokens,
                     max_usd=max(0.01, self.budget.max_usd - self.budget.used_usd),
                     deadline_ms=int(min(self.budget.remaining_ms(), 600_000)),
@@ -127,6 +136,23 @@ class _Ctx:
             if result.status == "degraded":
                 raise AppError("PROVIDER_UNAVAILABLE", "Agent 内核不可用", retryable=False)
             if result.status == "budget_exceeded":
+                # 预算耗尽 **不等于** 这一轮什么都没交付：模型常常已经把 emit_* 调用
+                # 成功（内核的 EmitSlot 里有完整产出），只是随后又开了一轮工具循环
+                # 才撞上闸门。真实表现（2026-11-09）：planner 的课程骨架已经
+                # accepted，却因为 turns used=11 limit=10 被判"规划失败"，整门课
+                # 降级成模板版——用户拿到的是一门"简化版"，而完整版其实已经生成。
+                #
+                # 所以先看 result：有可用产出就当作成功交付，把"超预算"降级成一条
+                # 警告（金额仍然记账，闸门仍然生效），而不是把成果扔掉。
+                partial = _extract_text(result.result)
+                if partial:
+                    log.warning(
+                        "budget_exceeded_but_delivered",
+                        role=role,
+                        node=node,
+                        message=str((result.error or {}).get("message", ""))[:200],
+                    )
+                    return partial, {"tokens_in": tokens_in, "tokens_out": tokens_out}
                 raise AppError(
                     "BUDGET_EXCEEDED",
                     str((result.error or {}).get("message", "预算耗尽")),
@@ -162,7 +188,18 @@ class _Ctx:
         return read_file(self.sha, path)
 
     def line_count(self, path: str) -> int:
-        return mirror_line_count(self.sha, path)
+        """文件行数（**按 job 记忆化**）。
+
+        课时级锚点校验会对每个课时问一遍"这些文件各有多少行"，12 个课时 × 50 个文件
+        就是 600 次镜像读取。结果在同一个 commit 内不会变，所以按 (sha, path) 缓存；
+        否则这段校验自己就会变成生成耗时的可观部分。
+        """
+        key = (self.sha, path)
+        cached = self._line_counts.get(key)
+        if cached is None:
+            cached = mirror_line_count(self.sha, path)
+            self._line_counts[key] = cached
+        return cached
 
     # ---- 产物外置 --------------------------------------------------------
     def save_artifact(self, node: str, key: str, payload: Any) -> str:
@@ -172,6 +209,27 @@ class _Ctx:
 
     def load_artifact(self, key_path: str) -> Any:
         return object_store.get_json("artifacts", key_path)
+
+    async def persist_commit_file_count(self, file_count: int) -> None:
+        """把镜像里的**真实**文件数写回 `commits` 行。
+
+        为什么需要这一步：`commits.file_count` 由入队时的 `resolve_commit` 写入，而
+        `GET /repos/{o}/{r}/commits/{ref}` 返回的 `files` 是"这个 commit 改过哪些
+        文件"，不是仓库的文件数（sherlock 的 HEAD 只改了 1 个文件 → UI 写着
+        `commit c588d7c8 · 1 个文件`，镜像里其实是 51 个）。N3 是唯一见过完整镜像
+        清单的地方，所以由它纠正。
+
+        非致命：写失败只记日志。文件数是个展示字段，绝不能因为它让课程生成失败。
+        """
+        if not self.sha or file_count <= 0:
+            return
+        try:
+            async with session_scope() as session:
+                await session.execute(
+                    update(Commit).where(Commit.sha == self.sha).values(file_count=int(file_count))
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("commit_file_count_persist_failed", sha8=self.sha[:8], error=str(exc)[:200])
 
     # ---- 进度 ------------------------------------------------------------
     async def emit_progress(self, node: str, percent: int = 0) -> None:

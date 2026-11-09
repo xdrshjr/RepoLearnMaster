@@ -248,6 +248,48 @@ export interface RunHandle {
 }
 
 /**
+ * `collect(slot)` 之后，这份结果里到底有没有**可交付的东西**。
+ *
+ * 为什么不能只看 `Object.keys(result).length`：`collect()` 永远返回 5 个键
+ * （curriculum + 三个桶 + failures），所以"空交付"也会看起来像有内容。
+ * 判断口径与 Python 侧 `_extract_text` 必须一致，否则会出现"内核说交付了、
+ * Python 说没东西"这种互相矛盾的状态。
+ */
+export function hasDeliverable(result: Record<string, unknown> | null | undefined): boolean {
+  if (!result) return false;
+  if (result.curriculum) return true;
+  for (const key of ['lessons', 'traces', 'quizzes']) {
+    const bucket = result[key];
+    if (bucket && typeof bucket === 'object' && Object.keys(bucket as object).length > 0) return true;
+  }
+  return false;
+}
+
+/**
+ * `run.failed` 的数据体。
+ *
+ * 抽成**纯函数**是为了让"交付物必须跟着失败事件走"这条规则能被单测直接钉住：
+ * 它曾经丢过一次（见 `result` 字段的注释），而那种丢失只表现为"课程突然变成
+ * 简化版"，从事件流里完全看不出来。
+ */
+export function failedRunData(input: {
+  code: string;
+  message: string;
+  retryable: boolean;
+  usage: Record<string, unknown>;
+  delivered?: Record<string, unknown> | null;
+}): Record<string, unknown> {
+  return {
+    code: input.code,
+    message: input.message,
+    retryable: input.retryable,
+    usage: { ...input.usage },
+    // 空交付不传，免得让"什么都没交付"看起来像"交付了空对象"。
+    ...(hasDeliverable(input.delivered) ? { result: input.delivered } : {}),
+  };
+}
+
+/**
  * 启动一次 run，返回事件流与终态 promise。
  *
  * 关键设计：**事件流与终态是两个独立的消费面**。HTTP 层只负责把 envelopes 写成
@@ -308,6 +350,10 @@ export async function startRun(req: RunRequest): Promise<RunHandle> {
   let budgetTripped: BudgetExceeded | null = null;
   let agentRef: CoreAgent | null = null;
   let abortReason: string | null = null;
+  // 交付即收工：`emit_*` 成功之后模型再开一轮只是把整段上下文重发一遍。
+  let deliverySucceeded = false;
+  // 本轮已按 `text_delta` 估过的输出 token，用来和 provider 上报值对账。
+  let deltaOutThisTurn = 0;
 
   push(
     envelope(ctx, 'system.init', {
@@ -339,6 +385,18 @@ export async function startRun(req: RunRequest): Promise<RunHandle> {
       timeouts: { idleTimeout: Math.min(budget.limits.deadlineMs, 180_000), llmCallTimeout: 180_000 },
     });
     agentRef = agent;
+    // 交付即收工：`emit_*` 是交付通道，成功之后模型再开一轮只是把整段上下文重发一遍
+    // （实测单课时 10 轮 × 15k ≈ 150k tokens，正好撞掉 150k 的节点分闸，于是
+    // **已经写好的课时**被判超预算）。这里在交付瞬间 abort，由 done() 当作成功终态。
+    slot.onDelivered = () => {
+      deliverySucceeded = true;
+      abortReason = 'delivered';
+      try {
+        agent.abort();
+      } catch {
+        /* abort 失败不影响"已交付"这个事实 */
+      }
+    };
   } catch (err) {
     keyBox.value = null;
     return degradedRun(req, ctx, provider, `Agent construction failed: ${(err as Error).message}`);
@@ -349,6 +407,7 @@ export async function startRun(req: RunRequest): Promise<RunHandle> {
       for (const env of mapCoreEvent(ctx, event as unknown as CoreEventLike)) push(env);
       const t = event.type;
       if (t === 'turn_start') {
+        deltaOutThisTurn = 0;
         try {
           budget.beginTurn();
         } catch (e) {
@@ -361,7 +420,9 @@ export async function startRun(req: RunRequest): Promise<RunHandle> {
         const se = (event as { streamEvent?: { type?: string; delta?: string } }).streamEvent;
         if (se?.type === 'text_delta' && typeof se.delta === 'string') {
           // 保守估计输出侧 token：只在没有 usage 时才作为唯一来源。
-          budget.recordOutputTokens(Math.ceil(se.delta.length / 4));
+          const est = Math.ceil(se.delta.length / 4);
+          deltaOutThisTurn += est;
+          budget.recordOutputTokens(est);
         }
       }
       if (t === 'turn_end') {
@@ -371,7 +432,11 @@ export async function startRun(req: RunRequest): Promise<RunHandle> {
           // token 闸门只数输出侧，长 prompt 短回答的调用会完全逃过预算核算。
           budget.record(0, {
             inputTokens: Math.max(0, usage.inputTokens ?? 0),
-            outputTokens: 0, // 输出侧已由 text_delta 逐字累加，避免双计
+            // 输出侧原本写死 0（"已由 text_delta 逐字累加"），但**工具调用不产生
+            // text_delta**：一个只会 emit JSON 的 run 上报的输出 token 于是全被丢掉——
+            // 现场表现是 `cost_ledger.tokens_out=0`、`usd=0`，成本面板与成本闸门双双失效。
+            // 这里补上 text_delta 没覆盖的那部分。
+            outputTokens: Math.max(0, Math.max(0, usage.outputTokens ?? 0) - deltaOutThisTurn),
           });
         }
       }
@@ -400,6 +465,18 @@ export async function startRun(req: RunRequest): Promise<RunHandle> {
     try {
       await agent.prompt(req.prompt);
       const usage = budget.usage;
+      if (deliverySucceeded && !budgetTripped) {
+        // 交付完成即成功：abort 只是为了不再多跑一轮，不是失败。
+        const delivered: RunResult = {
+          status: 'completed',
+          result: collect(slot),
+          usage: { ...usage },
+          error: null,
+        };
+        push(envelope(ctx, 'run.completed', { result: delivered.result, usage: delivered.usage }));
+        recordResult(req.runId, delivered);
+        return delivered;
+      }
       if (budgetTripped) {
         const exceeded = budgetTripped as BudgetExceeded;
         push(
@@ -407,6 +484,9 @@ export async function startRun(req: RunRequest): Promise<RunHandle> {
             kind: exceeded.kind,
             used: exceeded.used,
             limit: exceeded.limit,
+            // usage 必须跟着预算事件走：Python 侧的 cost_ledger 与 job 级总闸
+            // 全靠它。漏掉这一行，内核明明数出 213,725 tokens，账本却记 0。
+            usage: { ...usage },
           }),
         );
         const result: RunResult = {
@@ -415,7 +495,26 @@ export async function startRun(req: RunRequest): Promise<RunHandle> {
           usage: { ...usage },
           error: { code: 'BUDGET_EXCEEDED', message: exceeded.message },
         };
-        push(envelope(ctx, 'run.failed', { code: 'BUDGET_EXCEEDED', message: exceeded.message, retryable: false }));
+        // `result` 必须跟着失败事件一起走。
+        //
+        // 真实故障（2026-11-09 复现：planner 第 10 轮 `emit_course_json` 已 accepted，
+        // 第 11 轮才触顶）：交付**已经完成**，预算却在"再多说一句话"的那一轮被撞掉，
+        // 于是 Python 侧拿到的是一份没有 result 的 run.failed —— 一门已经规划好的课
+        // 被判成"规划失败"，整门课降级成模板。交付物与终态是两条独立的线：
+        // 终态可以失败，已经交付的东西不能丢。
+        push(
+          envelope(
+            ctx,
+            'run.failed',
+            failedRunData({
+              code: 'BUDGET_EXCEEDED',
+              message: exceeded.message,
+              retryable: false,
+              usage: { ...usage },
+              delivered: result.result,
+            }),
+          ),
+        );
         recordResult(req.runId, result);
         return result;
       }
@@ -443,9 +542,20 @@ export async function startRun(req: RunRequest): Promise<RunHandle> {
       const usage = budget.usage;
       const message = (err as Error)?.message ?? String(err);
       const code = message.includes('idle') ? 'PROVIDER_UNAVAILABLE' : 'KERNEL_RUN_FAILED';
-      // abort 之后 core 有可能 reject 而不是 resolve：预算超限与用户取消必须
-      // 优先判定，否则会以 `retryable:true` 把"已超预算/已取消"的 run 交回
+      // abort 之后 core 有可能 reject 而不是 resolve：预算超限、已交付与用户取消
+      // 必须优先判定，否则会以 `retryable:true` 把"已超预算/已取消"的 run 交回
       // Python 侧重试，等于把闸门和取消按钮一起失效。
+      if (deliverySucceeded && !budgetTripped) {
+        const delivered: RunResult = {
+          status: 'completed',
+          result: collect(slot),
+          usage: { ...usage },
+          error: null,
+        };
+        push(envelope(ctx, 'run.completed', { result: delivered.result, usage: delivered.usage }));
+        recordResult(req.runId, delivered);
+        return delivered;
+      }
       if (budgetTripped) {
         const exceeded = budgetTripped as BudgetExceeded;
         push(
@@ -453,6 +563,9 @@ export async function startRun(req: RunRequest): Promise<RunHandle> {
             kind: exceeded.kind,
             used: exceeded.used,
             limit: exceeded.limit,
+            // usage 必须跟着预算事件走：Python 侧的 cost_ledger 与 job 级总闸
+            // 全靠它。漏掉这一行，内核明明数出 213,725 tokens，账本却记 0。
+            usage: { ...usage },
           }),
         );
         const tripped: RunResult = {
@@ -461,7 +574,19 @@ export async function startRun(req: RunRequest): Promise<RunHandle> {
           usage: { ...usage },
           error: { code: 'BUDGET_EXCEEDED', message: exceeded.message },
         };
-        push(envelope(ctx, 'run.failed', { code: 'BUDGET_EXCEEDED', message: exceeded.message, retryable: false }));
+        push(
+          envelope(
+            ctx,
+            'run.failed',
+            failedRunData({
+              code: 'BUDGET_EXCEEDED',
+              message: exceeded.message,
+              retryable: false,
+              usage: { ...usage },
+              delivered: tripped.result,
+            }),
+          ),
+        );
         recordResult(req.runId, tripped);
         return tripped;
       }
@@ -482,7 +607,13 @@ export async function startRun(req: RunRequest): Promise<RunHandle> {
         usage: { ...usage },
         error: { code, message },
       };
-      push(envelope(ctx, 'run.failed', { code, message, retryable: true }));
+      push(
+        envelope(
+          ctx,
+          'run.failed',
+          failedRunData({ code, message, retryable: true, usage: { ...usage }, delivered: result.result }),
+        ),
+      );
       recordResult(req.runId, result);
       return result;
     } finally {

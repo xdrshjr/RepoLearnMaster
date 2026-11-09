@@ -29,6 +29,13 @@ os.environ.setdefault("REPOLEARN_GITHUB_WEB_BASE", "http://127.0.0.1:9911")
 os.environ["REPOLEARN_HEARTBEAT_SECONDS"] = "3"
 os.environ["REPOLEARN_JOB_STALE_SECONDS"] = "30"
 
+# 回环流量绝不走代理（`httpx` 只认环境变量，不认 Windows 注册表里的 `ProxyOverride`）。
+# 没有这一行，"开发机装了 Clash/VPN"会让所有打 127.0.0.1 的用例变成 502
+# —— 与产品代码无关的红灯最难排查。产品侧同样有 `providers/http.py::new_local_client`。
+_LOOPBACK = "127.0.0.1,localhost,::1"
+os.environ["NO_PROXY"] = f"{_LOOPBACK},{os.environ['NO_PROXY']}" if os.environ.get("NO_PROXY") else _LOOPBACK
+os.environ["no_proxy"] = os.environ["NO_PROXY"]
+
 import pytest  # noqa: E402
 from httpx import ASGITransport, AsyncClient  # noqa: E402
 from sqlalchemy import text  # noqa: E402

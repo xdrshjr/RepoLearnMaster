@@ -191,8 +191,42 @@ def check_quiz(quiz: list[dict]) -> list[str]:
     return errors
 
 
+def lesson_anchors(lesson: dict) -> list[dict]:
+    """把课时里所有"指到源码某几行"的锚点收集出来（focus + code_notes）。
+
+    与 `publish._collect_steps` 的口径一致：发布前校验的就是这些，所以课时级的
+    预校验必须扫同一批东西，否则又会出现"课时级说没问题、发布时说越界"。
+    """
+    out: list[dict] = []
+    for step in lesson.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        for seg in step.get("segments") or []:
+            focus = (seg or {}).get("focus") if isinstance(seg, dict) else None
+            if isinstance(focus, dict):
+                out.append(focus)
+        for note in step.get("code_notes") or []:
+            if isinstance(note, dict) and note.get("file"):
+                line = note.get("line", 1)
+                out.append({"file": note["file"], "line_start": line, "line_end": line})
+    return out
+
+
+def check_lesson_anchors(lesson: dict, file_lines: dict[str, int]) -> list[str]:
+    """课时级锚点校验：**在写课时的自修复循环里**跑，而不是等到发布。
+
+    为什么必须提前到课时级（2026-11-09 真机复现）：发布前 `check_anchors` 一旦报错，
+    `publish` 直接抛 `ANCHOR_STALE` 把**整门课**回滚——12 个课时、160 万 tokens 的
+    产出因为**一个**越界锚点全部作废，用户只看到"生成失败"。而在课时级，这条错误
+    会作为校验失败回灌给模型（`produce_validated` 的修复轮），模型只要改一行就能
+    自己修好；实在修不好也只丢这一个课时。
+    """
+    return check_anchors(lesson_anchors(lesson), file_lines)
+
+
 def check_anchors(anchors: list[dict], file_lines: dict[str, int]) -> list[str]:
     """锚点存在性校验（spec §6.2 / T-ANCHOR-1）。这是"可追溯"承诺的唯一执行点。"""
+
     errors: list[str] = []
     for anchor in anchors:
         path = str(anchor.get("file", ""))

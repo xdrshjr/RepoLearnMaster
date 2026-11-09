@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from repolearn.core.clock import utcnow
@@ -185,6 +185,29 @@ def compute_quality(
     )
 
 
+def _lesson_files(doc: dict) -> list[dict]:
+    """课时的文件清单：优先用模型自己给的，其次用锚点反推（去重且保序）。"""
+    declared = [item for item in (doc.get("files") or []) if isinstance(item, dict) and item.get("path")]
+    if declared:
+        return declared
+    seen: list[str] = []
+    for step in doc.get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        for seg in step.get("segments") or []:
+            focus = (seg or {}).get("focus") if isinstance(seg, dict) else None
+            if isinstance(focus, dict) and focus.get("file"):
+                path = str(focus["file"])
+                if path not in seen:
+                    seen.append(path)
+        for note in step.get("code_notes") or []:
+            if isinstance(note, dict) and note.get("file"):
+                path = str(note["file"])
+                if path not in seen:
+                    seen.append(path)
+    return [{"path": path} for path in seen]
+
+
 async def publish(
     session: AsyncSession,
     *,
@@ -273,6 +296,27 @@ async def publish(
     course = await session.get(CourseVersion, course_id)
     if course is None:
         raise AppError("COURSE_NOT_READY", "课程版本不存在")
+
+    # 先清掉**上一次发布**留在这一版本下的子行，再写入这一次的。
+    #
+    # `/rebuild` 与"同一个 commit 再生成一次"都会走到这里，而 `lessons` 上有
+    # `UNIQUE(course_version_id, key)`：不清理就必然在第二次发布时抛
+    # `UNIQUE constraint failed`，job 以"生成过程中出现内部错误"收场——现象是
+    # "重新生成永远失败"，但内容本身完全正常（2026-11-09 真机复现）。
+    # 顺序：先删引用方（anchors/quiz/lesson），再删被引用方（section 级行由 lessons 覆盖）。
+    existing_lessons = (
+        await session.execute(select(Lesson.id).where(Lesson.course_version_id == course_id))
+    ).scalars().all()
+    if existing_lessons:
+        # `steps` 的主键是 (lesson_id, order_index)，没有 course_version_id —— 只能按
+        # 课时 id 删。硬编码一张"哪些表有 course_version_id"的清单很容易漏，
+        # 所以这里按关系一层层删：steps →（anchors/quiz/traces）→ lessons。
+        await session.execute(delete(Step).where(Step.lesson_id.in_(existing_lessons)))
+    await session.execute(delete(SourceAnchor).where(SourceAnchor.course_version_id == course_id))
+    await session.execute(delete(QuizItem).where(QuizItem.course_version_id == course_id))
+    await session.execute(delete(SimulatedTrace).where(SimulatedTrace.course_version_id == course_id))
+    await session.execute(delete(Lesson).where(Lesson.course_version_id == course_id))
+    await session.flush()
     course.title = str(curriculum.get("title", course.title))
     course.subtitle = curriculum.get("subtitle")
     course.summary_md = str(curriculum.get("summary_md", "") or "")
@@ -318,7 +362,10 @@ async def publish(
             order_index=order,
             status="ready",
             playback_meta={
-                "files": doc.get("files") or [],
+                # 课时没写 `files` 时，从锚点（focus / code_notes）反推：文件树显示的
+                # 必须是"这节课真的在讲的代码"，否则会出现"树里 0 个文件、面板却在显示
+                # sherlock.py"这种自相矛盾的界面（2026-11-09 浏览器实测）。
+                "files": _lesson_files(doc),
                 "trace_key": doc.get("trace_key"),
                 "certainty_legend": {
                     "source_fact": "源码事实",

@@ -20,6 +20,7 @@ import re
 from typing import Any
 
 from repolearn.analysis.knowledge_graph import KnowledgeGraph
+from repolearn.analysis.paths import is_test_path
 
 SECTION_TITLES = {
     "overview": "第一层 · 宏观架构",
@@ -40,22 +41,43 @@ def seconds_for(text: str) -> int:
 
 
 def _representative_files(kg: KnowledgeGraph) -> list[str]:
-    """按"模块内符号数"排出代表性文件。
+    """按"这个文件值不值得讲"排序出代表文件。
 
     回退链是刻意的：没有符号时用模块里出现过的任何文件，再没有才用模块 key
     （`README.md` 这类单文件模块的 key 恰好就是文件名）。
+
+    **为什么不能只按"模块内符号数"排**（旧实现就是这样）：`tests/` 往往符号最多，
+    于是 sherlock 的 12 个课时里有 10 个在讲 `test_probes.py` / `conftest.py`，
+    而 `sherlock.py`（真正的入口）排在最后。学习者要的是产品代码，不是测试夹具。
+
+    现在的排序键（越大越靠前）：
+    * 产品代码优先（测试/夹具/示例/文档/第三方目录排到最后，而不是删掉——镜像很小
+      的仓库可能"只有"这些文件，删掉会让模板课无内容可讲）；
+    * 入度高的符号所在的文件优先（被调用得多，说明它在这门课里更重要）；
+    * 文件名/目录名像入口的（main/cli/app/server）加分；
+    * 最后用路径做确定性 tie-break（同一仓库两次生成必须得到同一门课）。
     """
-    by_module: dict[str, list[str]] = {}
+    in_deg = kg.call_graph.in_degree
+    per_file: dict[str, list] = {}
     for sym in kg.symbols:
-        module = sym.file.split("/")[0] if "/" in sym.file else sym.file
-        by_module.setdefault(module, []).append(sym.file)
-    ordered: list[str] = []
-    for module in sorted(by_module, key=lambda m: -len(by_module[m])):
-        seen: set[str] = set()
-        for path in by_module[module]:
-            if path not in seen:
-                seen.add(path)
-                ordered.append(path)
+        per_file.setdefault(sym.file, []).append(sym)
+
+    def rank(path: str) -> tuple:
+        """越小越靠前：产品代码、像入口的、入度高、符号多、路径字典序。"""
+        symbols = per_file.get(path, [])
+        calls = sum(in_deg.get(s.name, 0) for s in symbols)
+        name = path.rsplit("/", 1)[-1].lower()
+        looks_entry = any(h in name for h in ("main", "cli", "app", "server", "entrypoint"))
+        return (
+            1 if is_test_path(path) else 0,
+            0 if looks_entry else 1,
+            -calls,
+            -len(symbols),
+            path,
+        )
+
+    ordered = sorted(per_file, key=rank)
+
     for mod in kg.modules:
         if "." in mod.path and mod.path not in ordered:
             ordered.append(mod.path)

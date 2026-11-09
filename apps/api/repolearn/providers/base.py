@@ -189,6 +189,16 @@ class AgentBudget:
         }
 
 
+#: 默认下发给内核的**只读仓库工具**（产出工具 `emit_*` 由内核自己并进来）。
+DEFAULT_AGENT_TOOLS = ("repo_list_tree", "repo_read_file", "repo_grep", "repo_file_outline")
+
+#: 写课时只需要"看清结构"，不需要通读文件：锚点（N4 产出、N7 复核）已经带精确行号，
+#: 而一次 `repo_read_file` 会把之后**每一轮**的上下文都撑大。实测（sherlock，
+#: 2026-11-09）：单课时花掉 155k input tokens、输出 token 为 0，最后撞上 token 分闸，
+#: 一个字讲解都没写出来。收窄到 outline + grep 就够核对。
+WRITER_AGENT_TOOLS = ("repo_file_outline", "repo_grep")
+
+
 @dataclass
 class AgentRunRequest:
     run_id: str

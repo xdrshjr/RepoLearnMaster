@@ -25,19 +25,27 @@ import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from repolearn.core.clock import utcnow
 from repolearn.core.config import settings
 from repolearn.core.errors import AppError
 from repolearn.core.logging import get_logger
 from repolearn.providers.base import AgentBudget, AgentEvent, AgentRunRequest, AgentRunResult
-from repolearn.providers.http import new_client
+from repolearn.providers.http import new_local_client
 
 log = get_logger("agent_runtime")
 
 CORE_PACKAGE = "@aragon-agent/core"
 HEALTH_TIMEOUT_S = 2.0
 PROBE_TTL_S = 60.0
+
+#: 内核 `KERNEL_BUSY`（HTTP 429）的退避序列。它的语义是"现在并发的 run 太多"，
+#: 是**背压**而不是故障：等一会儿再试就能成功，而直接放弃会让整门课作废。
+#: 总和 15 秒，够等一轮并发的课时写完，又不会把 job 的 deadline 吃掉。
+BUSY_BACKOFF_S = (1.0, 2.0, 4.0, 8.0)
+#: 429 重试的总时间预算（比上面的和略大，留给"已经等了一部分"的情况）。
+BUSY_TOTAL_BUDGET_S = 20.0
 
 
 # --------------------------------------------------------------------------- #
@@ -78,7 +86,7 @@ async def probe_kernel() -> tuple[bool, str | None]:
     """2 秒超时的健康探测。超时就是"不通"——不允许无限等待把启动拖死。"""
     url = f"{settings.kernel_url.rstrip('/')}/healthz"
     try:
-        async with new_client(timeout_read=HEALTH_TIMEOUT_S) as client:
+        async with new_local_client(timeout_read=HEALTH_TIMEOUT_S) as client:
             resp = await client.get(url, timeout=HEALTH_TIMEOUT_S)
             if resp.status_code != 200:
                 return False, None
@@ -220,13 +228,36 @@ class HttpKernelRuntime:
     async def run(self, req: AgentRunRequest) -> tuple[list[AgentEvent], AgentRunResult]:
         events: list[AgentEvent] = []
         result = AgentRunResult(status="failed", runtime=self.name)
+        # 一次 run 的终态由若干个 SSE 事件共同拼出来（`budget.exceeded` 与
+        # `run.failed` 各带一份信息），所以用一个累积器折叠，而不是每次整体覆盖。
+        acc = new_run_accumulator()
+
         url = f"{self.base_url}/v1/run"
         attempts = 0
-        async with new_client(timeout_read=(req.budget.deadline_ms / 1000) + 30) as client:
+        busy_retries = 0
+        busy_deadline = time.monotonic() + BUSY_TOTAL_BUDGET_S
+        async with new_local_client(timeout_read=(req.budget.deadline_ms / 1000) + 30) as client:
             while attempts < 2:
                 attempts += 1
                 try:
                     async with client.stream("POST", url, json=self._payload(req), headers=self._headers()) as resp:
+                        if resp.status_code == 429:
+                            # `KERNEL_BUSY` 是**背压**，不是故障：内核在说"同时跑的 run 太多"。
+                            #
+                            # 真实故障（2026-11-09 浏览器实测，job job_01M6ZCNVY0CGT1GHGV24CNKPZN）：
+                            # 课时并发生成时命中内核 8 路上限 → 429 → 旧代码当成
+                            # PROVIDER_UNAVAILABLE 立刻放弃 → **整个 job failed**，
+                            # 12 个课时一个都没留下。等一两秒再试就能成功。
+                            body = (await resp.aread()).decode("utf-8", "ignore")
+                            if busy_retries < len(BUSY_BACKOFF_S) and time.monotonic() < busy_deadline:
+                                delay = BUSY_BACKOFF_S[busy_retries]
+                                busy_retries += 1
+                                attempts -= 1  # 429 不占用 5xx 的"再试一次"预算
+                                log.warning("kernel_busy_retry", delay_s=delay, attempt=busy_retries)
+                                await asyncio.sleep(delay)
+                                continue
+                            result.error = {"code": "KERNEL_BUSY", "message": body[:400]}
+                            return events, result
                         if resp.status_code >= 400:
                             body = (await resp.aread()).decode("utf-8", "ignore")
                             result.error = {"code": "KERNEL_ERROR", "message": body[:400]}
@@ -242,40 +273,7 @@ class HttpKernelRuntime:
                                 if parsed is None:
                                     continue
                                 events.append(parsed)
-                                if parsed.type == "run.completed":
-                                    result = AgentRunResult(
-                                        status="completed",
-                                        result=dict(parsed.data.get("result") or {}),
-                                        usage=dict(parsed.data.get("usage") or {}),
-                                        runtime=self.name,
-                                    )
-                                elif parsed.type == "run.failed":
-                                    result = AgentRunResult(
-                                        status=(
-                                            "budget_exceeded"
-                                            if parsed.data.get("code") == "BUDGET_EXCEEDED"
-                                            else "cancelled"
-                                            if parsed.data.get("code") == "CANCELLED"
-                                            else "degraded"
-                                            if parsed.data.get("code") == "CORE_UNAVAILABLE"
-                                            else "failed"
-                                        ),
-                                        usage=dict(parsed.data.get("usage") or {}),
-                                        error={
-                                            "code": parsed.data.get("code", "KERNEL_RUN_FAILED"),
-                                            "message": parsed.data.get("message", ""),
-                                        },
-                                        runtime=self.name,
-                                    )
-                                elif parsed.type == "budget.exceeded":
-                                    result = AgentRunResult(
-                                        status="budget_exceeded",
-                                        error={
-                                            "code": "BUDGET_EXCEEDED",
-                                            "message": str(parsed.data.get("kind", "budget")),
-                                        },
-                                        runtime=self.name,
-                                    )
+                                result = apply_run_event(acc, parsed, runtime=self.name)
                     return events, result
                 except Exception as exc:  # noqa: BLE001 - 网络异常按"重试一次"处理
                     if attempts >= 2:
@@ -287,7 +285,7 @@ class HttpKernelRuntime:
     async def cancel(self, run_id: str) -> None:
         url = f"{self.base_url}/v1/run/{run_id}/cancel"
         try:
-            async with new_client(timeout_read=5.0) as client:
+            async with new_local_client(timeout_read=5.0) as client:
                 await client.post(url, headers=self._headers())
         except Exception:  # noqa: BLE001 - 取消失败不改变本地终态判定
             pass
@@ -324,6 +322,90 @@ def _parse_sse(frame: str) -> AgentEvent | None:
         ts=int(payload.get("ts", 0) or 0),
         data=dict(payload.get("data") or {}),
     )
+
+
+# --------------------------------------------------------------------------- #
+# SSE 事件 → run 终态（纯函数，便于单测）
+# --------------------------------------------------------------------------- #
+
+
+def new_run_accumulator() -> dict[str, Any]:
+    """一次 run 的终态累积器。"""
+    return {"status": "failed", "result": {}, "usage": {}, "error": None}
+
+
+def apply_run_event(acc: dict[str, Any], event: AgentEvent, *, runtime: str = "kernel") -> AgentRunResult:
+    """把一个 SSE 事件折叠进终态，并返回当前结果的快照。
+
+    **为什么不能"每个事件整体覆盖结果"**：一次预算耗尽的 run 会先发
+    `budget.exceeded`（带 kind/used/limit + usage），再发 `run.failed`
+    （带 code/message，早期版本**不带 usage**）。整体覆盖会让后者的空 usage
+    把真实用量抹成 0——现场表现就是内核说 `tokens used=213725`，
+    而 `cost_ledger` 记 `tokens_in=0`、job 级总闸永远不触发。
+
+    规则：**usage 只累加不清空**（谁有值就留谁）；其余字段以最后一个显式给出者为准。
+    """
+    data = event.data if isinstance(event.data, dict) else {}
+
+    incoming_usage = data.get("usage")
+    if isinstance(incoming_usage, dict) and incoming_usage:
+        merged = dict(acc.get("usage") or {})
+        merged.update(incoming_usage)
+        acc["usage"] = merged
+
+    if event.type == "run.completed":
+        acc["status"] = "completed"
+        acc["result"] = dict(data.get("result") or {})
+        acc["error"] = None
+    elif event.type == "run.failed":
+        code = data.get("code") or "KERNEL_RUN_FAILED"
+        # 交付物可能已经在失败之前落地：内核在 `run.failed` 里带回 result（例如
+        # `emit_course_json` 已 accepted，随后某一轮工具循环才触顶预算）。丢掉它
+        # 会把"已经规划好的课"判成"规划失败"，整门课静默降级成模板版。
+        # 只在**确实带回来了内容**时覆盖，避免空 result 把已有结果抹掉。
+        incoming_result = data.get("result")
+        if isinstance(incoming_result, dict) and incoming_result:
+            acc["result"] = dict(incoming_result)
+        acc["status"] = (
+            "budget_exceeded"
+            if code == "BUDGET_EXCEEDED"
+            else "cancelled"
+            if code == "CANCELLED"
+            else "degraded"
+            if code == "CORE_UNAVAILABLE"
+            else "failed"
+        )
+        acc["error"] = {"code": code, "message": data.get("message", "")}
+    elif event.type == "budget.exceeded":
+        # `used/limit` 描述"哪一档超了"，`usage` 才是真实 tokens。两者都留：
+        # 报表看 usage，错误文案与前端提示看 used/limit。
+        kind = str(data.get("kind", "budget"))
+        used = data.get("used")
+        limit = data.get("limit")
+        acc["status"] = "budget_exceeded"
+        acc["error"] = {
+            "code": "BUDGET_EXCEEDED",
+            "message": f"budget exceeded: {kind} used={used} limit={limit}",
+            "kind": kind,
+            "used": used,
+            "limit": limit,
+        }
+    else:
+        # 其它事件（agent.text.delta / tool.start …）只影响事件流，不影响终态。
+        return _snapshot(acc, runtime)
+
+    return _snapshot(acc, runtime)
+
+
+def _snapshot(acc: dict[str, Any], runtime: str) -> AgentRunResult:
+    return AgentRunResult(
+        status=str(acc.get("status") or "failed"),
+        result=dict(acc.get("result") or {}),
+        usage=dict(acc.get("usage") or {}),
+        error=acc.get("error"),
+        runtime=runtime,
+    )
+
 
 
 # --------------------------------------------------------------------------- #

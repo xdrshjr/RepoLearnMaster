@@ -222,7 +222,7 @@ node scripts/probe_gates.mjs --print                     # Gate 0 三态，与 /
 cd services/agent-kernel; npm test; npm run typecheck
 ```
 
-测试现状（本机实测，2026-11-09 本机凭据复用轮）：**277 pytest + 37 kernel + 78 vitest + 44 playwright** 全绿，另有 **4 条真后端端到端**（`node scripts/e2e-real.mjs`）。
+测试现状（本机实测，2026-11-09 实战修复轮）：**337 pytest + 47 kernel + 86 vitest + 44 playwright** 全绿，另有 **4 条真后端端到端**（`node scripts/e2e-real.mjs`）。
 这组数字由 `tests/test_ci_and_docs.py::test_readme_test_matrix_matches_repo` 守住：README 写的 pytest 收集数与仓库实测不一致就直接红——文档说谎是本项目最不能接受的一类缺陷。
 
 设计文档：[`docs/plans/repo-learn-platform/spec.md`](docs/plans/repo-learn-platform/spec.md)

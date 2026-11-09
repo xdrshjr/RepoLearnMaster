@@ -22,6 +22,15 @@ export interface EmitSlot {
   quizzes: Record<string, unknown[]>;
   /** 每次 emit 的失败历史，便于事后看"模型为什么交不出东西"。 */
   failures: Array<{ tool: string; error: string }>;
+  /**
+   * 一次成功的 emit 之后回调。
+   *
+   * `emit_*` 是**交付通道**，交付完成就意味着这轮 run 的目的已经达到：模型之后
+   * 再开一轮"总结一句"纯属浪费——每多一轮就要重发一遍整段上下文（实测单课时
+   * 10 轮 × 15k ≈ 150k tokens，正好把节点 token 分闸撞掉，于是"已经写好的课时"
+   * 被判超预算）。回调让 Kernel 在交付瞬间收工。
+   */
+  onDelivered?: (tool: string) => void;
 }
 
 export function createEmitSlot(): EmitSlot {
@@ -78,6 +87,7 @@ export function createEmitTools(slot: EmitSlot) {
         return fail(error, { accepted: false });
       }
       slot.curriculum = parsed.data;
+      slot.onDelivered?.('emit_course_json');
       return ok({ accepted: true, sections: parsed.data.sections.length });
     },
   });
@@ -99,6 +109,7 @@ export function createEmitTools(slot: EmitSlot) {
       }
       const key = parsed.data.key;
       slot.lessons[key] = parsed.data;
+      slot.onDelivered?.('emit_lesson');
       if (parsed.data.quiz.length > 0) slot.quizzes[key] = parsed.data.quiz;
       return ok({ accepted: true, key, steps: parsed.data.steps.length });
     },
@@ -120,6 +131,7 @@ export function createEmitTools(slot: EmitSlot) {
         return fail(error, { accepted: false });
       }
       slot.traces[parsed.data.key] = parsed.data;
+      slot.onDelivered?.('emit_trace');
       return ok({ accepted: true, key: parsed.data.key, steps: parsed.data.steps.length });
     },
   });

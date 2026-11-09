@@ -18,7 +18,24 @@ from repolearn.providers.base import LlmError
 RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 529}
 
 
-def new_client(timeout_read: float | None = None) -> httpx.AsyncClient:
+def new_client(timeout_read: float | None = None, *, trust_env: bool = True) -> httpx.AsyncClient:
+    """出站客户端。
+
+    `trust_env=True` 是**外网**调用要的：装了代理/VPN 的机器靠它把 GitHub 与模型
+    流量送出去。
+
+    但回环（web → api → kernel）**绝不能**走代理，用 `new_local_client()`：
+    `httpx` 只认 `HTTP_PROXY` / `NO_PROXY` 环境变量，**不认 Windows 注册表里的
+    `ProxyOverride`**，而 `trust_env=True` 时它会通过 `urllib.request.getproxies()`
+    读到注册表里的系统代理。真实故障（2026-11-09 本机实测）：
+
+        GET http://127.0.0.1:<port>/healthz
+          trust_env=True  → 502（请求被系统代理 127.0.0.1:7897 接走并失败）
+          trust_env=False → 200
+
+    这类故障最难查：产品在装了代理的机器上会随机"内核不可用 / 429"，而
+    `curl` 与服务日志都正常。
+    """
     return httpx.AsyncClient(
         timeout=httpx.Timeout(
             connect=settings.http_timeout_connect,
@@ -28,7 +45,13 @@ def new_client(timeout_read: float | None = None) -> httpx.AsyncClient:
         ),
         limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
         follow_redirects=True,
+        trust_env=trust_env,
     )
+
+
+def new_local_client(timeout_read: float | None = None) -> httpx.AsyncClient:
+    """回环专用客户端：**永不经过代理**（内核、本机 API 的探测与 run）。"""
+    return new_client(timeout_read, trust_env=False)
 
 
 def backoff_delay(attempt: int, retry_after: float | None = None) -> float:

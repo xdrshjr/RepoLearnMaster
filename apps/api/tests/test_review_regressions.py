@@ -261,15 +261,38 @@ def test_node_allowance_uses_node_name_not_schema_name():
     # 显式给总闸而不是读 settings：这条用例测的是**节点分闸表**，不该被
     # `REPOLEARN_JOB_MAX_TOKENS` 这类环境变量左右（机器上有一个更小的值就会红）。
     budget = JobBudget(max_tokens=2_000_000)
-    # 2026-11-09 放宽后：规划节点必须能容下一次 30k+ 的真实规划
-    assert budget.node_allowance("plan_curriculum") == 200_000
-    assert budget.node_allowance("simulate_trace") == 20_000
+    # 2026-11-09 定值：规划节点的额度必须容下"6 轮工具循环 + 30k 级规划 prompt"
+    assert budget.node_allowance("plan_curriculum") == 250_000
+    assert budget.node_allowance("simulate_trace") == 60_000
     assert budget.node_allowance("some_schema_name") == 8_000
 
     # 按课时扇出时要给后续课时留出额度：剩余额度紧张时才看得出差别
     tight = JobBudget(max_tokens=1_000_000, used_tokens=700_000)
-    assert tight.node_allowance("write_lessons") == 120_000
+    assert tight.node_allowance("write_lessons") == 240_000
     assert tight.node_allowance("write_lessons", per_lesson=True) == 1_000
+
+
+def test_max_turns_is_per_node_and_caps_the_amplifier():
+    """轮数是 token 用量的乘数：规划节点不该跑到 16 轮。
+
+    真实故障链（第一轮）：`maxTurns=16` + `repo_read_file` 单文件 256KB（≈64k tokens）
+    → 一次规划 run 实测 213,725 tokens。把轮数按节点用途收紧，比事后抬高 token
+    上限有效——后者只是把同一个放大器调大。
+
+    真实故障链（第二轮，2026-11-09）：收紧到 6 又撞出了**另一个**故障——真实模型
+    会先读 8 轮才肯交付，于是每次生成都 `turns used=7 limit=6`，整门课静默降级成
+    模板版。所以规划节点的轮数必须装得下 prompt 允许的阅读量（见
+    `test_agent_turn_budget.py`），amplifier 由 token 分闸负责。
+    """
+    budget = JobBudget(max_tokens=2_000_000)
+    assert budget.node_max_turns("plan_curriculum") == 12
+    assert budget.node_max_turns("write_lessons") == 12
+    assert budget.node_max_turns("simulate_trace") == 4
+    assert budget.node_max_turns("analyze_repo") == 2
+    # 未知节点有默认值，且永远 ≥1（0 轮等于不跑）
+    assert budget.node_max_turns("some_schema_name") == 8
+    # 规划节点仍然远低于旧的 16 轮默认：放大器被压住这件事没有被放松
+    assert budget.node_max_turns("plan_curriculum") < 16
 
 
 def test_resolver_candidates_carry_prices():
