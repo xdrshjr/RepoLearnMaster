@@ -30,6 +30,7 @@ from urllib.parse import urlparse
 from repolearn.core.config import settings
 from repolearn.core.errors import AppError
 from repolearn.core.logging import get_logger
+from repolearn.ingest.github_auth import TokenSource
 from repolearn.providers.base import LlmError
 from repolearn.providers.http import new_client, request_with_retry
 
@@ -202,14 +203,22 @@ def parse_repo_url(raw: str) -> RepoRef:
     return RepoRef(full_name=full, owner=owner, name=name, ref=ref)
 
 
+def _auth() -> TokenSource:
+    """当前生效的凭据（含来源）。**每次现取**但内部有缓存，代价是一次字典命中。"""
+    from repolearn.ingest.github_auth import resolve_token
+
+    return resolve_token()
+
+
 def _headers() -> dict[str, str]:
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "RepoLearn/0.1",
     }
-    if settings.github_token:
-        headers["Authorization"] = f"Bearer {settings.github_token}"
+    token = _auth().token
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     return headers
 
 
@@ -345,11 +354,14 @@ def _rate_details(info: RateInfo) -> dict:
 
 def _rate_limit_hint(info: RateInfo) -> str:
     """限流提示的**唯一**来源（错误响应、doctor、日志都走它，避免三处各说一套）。"""
+    from repolearn.ingest.github_auth import describe_failure
+
+    auth = _auth()
     parts: list[str] = []
-    if settings.github_token:
-        parts.append("已配置 REPOLEARN_GITHUB_TOKEN（上限 5000 次/小时）")
+    if auth.configured:
+        parts.append(f"已使用本机凭据（来源 {auth.source}，上限 5000 次/小时）")
     else:
-        parts.append("未配置 REPOLEARN_GITHUB_TOKEN（未认证上限 60 次/小时）")
+        parts.append("未找到任何 GitHub 凭据（未认证上限 60 次/小时）")
     if info.remaining is not None and info.limit is not None:
         parts.append(f"剩余 {info.remaining}/{info.limit}")
     elif info.remaining is not None:
@@ -360,8 +372,10 @@ def _rate_limit_hint(info: RateInfo) -> str:
     else:
         parts.append("重置时间未在响应头中给出，可到 https://api.github.com/rate_limit 查询")
     parts.append(f"端点 {_api()}")
-    if not settings.github_token:
-        parts.append("在 .env 填 REPOLEARN_GITHUB_TOKEN 后重启 API 可提升到 5000 次/小时")
+    if not auth.configured:
+        # 说清"还能怎么修"：自动发现失败时，把试过的来源列出来，否则用户只能反复重试。
+        parts.append(describe_failure(auth))
+        parts.append("修法：`gh auth login`（或让 Git Credential Manager 记住 github.com）后重启 API，或在 .env 填 REPOLEARN_GITHUB_TOKEN")
     return "；".join(parts)
 
 
@@ -626,28 +640,34 @@ def rate_limit_hint(remaining: int | None = None) -> str:
 
 
 def token_diagnostics() -> dict:
-    """`REPOLEARN_GITHUB_TOKEN` 的**可公开**诊断信息（doctor 用）。
+    """当前生效凭据的**可公开**诊断信息（doctor 用）。
 
-    只放指纹（前 4 + 后 4）与长度，不放明文：这块信息要显示在一个
-    "我到底读到的是哪一个 token"的排查面板上，而那个面板的截图经常被贴进
-    issue。
+    只放来源、指纹（前 4 + 后 4）与长度，不放明文：这块信息要显示在一个
+    "我到底读到的是哪一个 token"的排查面板上，而那个面板的截图经常被贴进 issue。
 
     `padded=True` 是一个真实存在的故障：`REPOLEARN_GITHUB_TOKEN= ghp_xxx`
     （等号后多一个空格）能通过 dotenv 解析，于是 GitHub 收到
     `Authorization: Bearer  ghp_xxx` 并回 401 `Bad credentials`——用户看到的
     是"token 无效"，而 token 本身是好的。这里把它指出来。
     """
+    from repolearn.ingest.github_auth import describe_failure
+
+    auth = _auth()
     raw = settings.github_token or ""
-    token = raw.strip()
-    if not token:
-        return {"configured": False, "fingerprint": None, "padded": False, "length": 0}
-    if len(token) <= 12:
-        fingerprint = f"{token[:2]}…{token[-2:]}"
-    else:
-        fingerprint = f"{token[:4]}…{token[-4:]}"
+    if not auth.configured:
+        return {
+            "configured": False,
+            "fingerprint": None,
+            "padded": False,
+            "length": 0,
+            "source": "none",
+            "detail": describe_failure(auth),
+        }
     return {
         "configured": True,
-        "fingerprint": fingerprint,
-        "padded": raw != token,
-        "length": len(token),
+        "fingerprint": auth.fingerprint(),
+        "padded": bool(raw) and raw != raw.strip(),
+        "length": len(auth.token),
+        "source": auth.source,
+        "detail": "",
     }

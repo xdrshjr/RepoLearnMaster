@@ -92,7 +92,7 @@ var/                      运行时数据（sqlite、对象存储、日志）—
 |---|---|
 | `start.ps1` 报端口被占用 | 先 `.\stop.ps1`；它会按 PID + 端口双路清理 |
 | 课程是"简化版"，没有 AI 讲解 | Gate 0 的 G1 未通过：`pnpm -C services/agent-kernel install` 后重启；`cli doctor` 可看三态 |
-| 导入仓库报「GitHub 接口限流」 | 未认证只有 60 次/小时：在 `.env` 填 `REPOLEARN_GITHUB_TOKEN`（经典 PAT 勾 `public_repo`）→ `.\stop.ps1` → `.\start.ps1 -SkipInstall`；提示里带着「剩余 N/60、HH:MM 后可重试」，`cli doctor` 会显示 token 指纹确认读到的是哪一个 |
+| 导入仓库报「GitHub 接口限流」 | 先 `\.venv\Scripts\python.exe -m repolearn.cli github-token --probe` 看 `limit=`：**60 说明凭据没被用上，5000 说明已认证**。产品会自动复用本机已登录的凭据（`gh auth login` / Git Credential Manager），只有全部取不到时才是 60 次/小时；那时按 doctor 的提示修，或在 `.env` 显式填 `REPOLEARN_GITHUB_TOKEN` 后重启 |
 | 导入仓库报「GitHub Token 无效或已过期」 | 401 `Bad credentials`：token 被撤销/复制时带了空格/已过期。`cli doctor` 的「GitHub 凭据」会指出是否有首尾空白；改完必须重启 API |
 | 没有配音 | 豆包未配置或配额问题：课程会自动切「字幕推进」模式，不影响完课 |
 | 下载 PDF 变成"打印视图" | Chromium 未安装：`python -m playwright install chromium` |
@@ -222,7 +222,7 @@ node scripts/probe_gates.mjs --print                     # Gate 0 三态，与 /
 cd services/agent-kernel; npm test; npm run typecheck
 ```
 
-测试现状（本机实测，2026-11-09 GitHub 限流修复轮）：**260 pytest + 37 kernel + 78 vitest + 44 playwright** 全绿，另有 **4 条真后端端到端**（`node scripts/e2e-real.mjs`）。
+测试现状（本机实测，2026-11-09 本机凭据复用轮）：**277 pytest + 37 kernel + 78 vitest + 44 playwright** 全绿，另有 **4 条真后端端到端**（`node scripts/e2e-real.mjs`）。
 这组数字由 `tests/test_ci_and_docs.py::test_readme_test_matrix_matches_repo` 守住：README 写的 pytest 收集数与仓库实测不一致就直接红——文档说谎是本项目最不能接受的一类缺陷。
 
 设计文档：[`docs/plans/repo-learn-platform/spec.md`](docs/plans/repo-learn-platform/spec.md)

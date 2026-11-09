@@ -27,38 +27,56 @@ Get-Content var\logs\api.err.log -Tail 40            # 后端真正报错的位�
 | `seed-demo` 第二次执行报唯一约束 | 旧版本非幂等 | 已修复；如仍报错先 `cli migrate` 再跑 |
 | PowerShell 报"字符串缺少终止符" | 脚本被编辑器存成了无 BOM 的 UTF-8 + 中文 | 本仓库脚本一律 ASCII；改动时保持 ASCII，或存成 UTF-8 BOM；`scripts\parse_check.ps1` 可验证 |
 
-### 1.1 GitHub Token 配置与验证
+### 1.1 GitHub 凭据与配额
 
-未认证调用只有 **60 次/小时**，而一次导入课程至少用掉 `/repos` + `/commits` 两格
-（大仓库还要 `/git/trees` 或 `/contents`）。配额用光时后端回
-`429 RATE_LIMITED`，提示里带「剩余 N/60、HH:MM 后可重试」——**看到这句就说明是配额，
-不是网络或代码问题**。
+GitHub 对未认证调用硬限 **60 次/小时/IP**，认证后是 **5000 次/小时**。这是服务端
+规则，代码提高不了——能做的只有"把本机已有的凭据用上"。因此产品有一条发现链：
+
+| 顺序 | 来源 | 适用场景 |
+|---|---|---|
+| 1 | `REPOLEARN_GITHUB_TOKEN`（`.env`） | 显式指定，**永远最高优先**，可覆盖自动发现 |
+| 2 | `GH_TOKEN` / `GITHUB_TOKEN` 环境变量 | CI / GitHub Actions 惯例 |
+| 3 | `gh auth token` | 已 `gh auth login` |
+| 4 | `git credential fill`（Git Credential Manager） | Windows 上装了 Git 通常就有 |
+| 5 | `%APPDATA%/GitHub CLI/hosts.yml` | gh 不在 PATH 上 |
+| 6 | `~/.git-credentials` | `credential.helper=store` |
+
+两条安全约束（改代码时别拆）：**只对官方 `api.github.com` 生效**（端点改成自建
+GHE 时自动跳过，避免把 github.com 的凭据发给自定义端点）；子进程一律
+`GIT_TERMINAL_PROMPT=0` / `GCM_INTERACTIVE=never` + 5 秒超时，**绝不交互**——
+GCM 弹窗会把 API 进程挂死。
+
+验证"到底生效了没有"（这是唯一可信的判据，别靠猜）：
 
 ```powershell
-# ① 配：.env 里这一行（经典 PAT 勾 public_repo；fine-grained PAT 只需 Contents: Read）
-#    REPOLEARN_GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-# ② 重启（API 只在启动时读 .env）
-.\stop.ps1
-.\start.ps1 -SkipInstall
-# ③ 验证：应显示 token 指纹，而不是"未配置"
-.\.venv\Scripts\python.exe -m repolearn.cli doctor
-#    [      ok] GitHub 凭据: 已配置 ghp_…6789（长度 40，上限 5000 次/小时）
+# 看来源 + 指纹（不打印明文）
+.\.venv\Scripts\python.exe -m repolearn.cli github-token
+#    source   : git-credential
+#    token    : gho_…VVOO (length 40)
+
+# 真实打一次 GET /rate_limit
+.\.venv\Scripts\python.exe -m repolearn.cli github-token --probe
+#    probe    : HTTP 200 limit=5000 remaining=5000
+#    verdict  : 已按认证配额计费（5000/h 量级）
 ```
 
-三种失败形状与各自含义（**别混为一谈**，下一步动作完全不同）：
+`limit=60` 就说明凭据没被用上：按 `cli doctor` 的「GitHub 凭据」提示修（它会列出
+已尝试的六个来源），或直接 `gh auth login`，或在 `.env` 填 token 后重启 API。
+
+### 1.2 限流的三种形状
+
+`403 rate limit exceeded` / `401 Bad credentials` / `403 Forbidden` 的下一步动作
+**完全不同**，不要混为一谈：
 
 | 现象 | 后端错误码 | 真实原因 | 处理 |
 |---|---|---|---|
-| `403 rate limit exceeded` + `X-RateLimit-Remaining: 0` | `RATE_LIMITED`（HTTP 429） | 配额耗尽（未认证 60/h，认证 5000/h） | 等提示里的时间，或配 token |
-| `401 Bad credentials` | `INVALID_KEY`（HTTP 401） | token 被撤销/过期/**等号后多了空格**（`Bearer  ghp_…`） | `cli doctor` 会指出 `padded`；修 `.env` 后重启 |
+| `403 rate limit exceeded` + `X-RateLimit-Remaining: 0` | `RATE_LIMITED`（HTTP 429） | 配额耗尽 | 等提示里的重置时间，或修凭据（见 1.1） |
+| `401 Bad credentials` | `INVALID_KEY`（HTTP 401） | token 被撤销/过期/**等号后多了空格** | `cli doctor` 会指出 `padded`；修后重启 |
 | `403 Forbidden`（无 rate limit 字样） | `REPO_FORBIDDEN`（HTTP 403） | 仓库私有/被封禁 | 换公开仓库（MVP 不支持私有仓库） |
 
-省额度的两条实现细节（改代码时别顺手删掉）：
-
-* `fetch_repo_meta` / `resolve_commit` 有 **60 秒进程内缓存**（`CACHE_TTL_SECONDS`），
-  键含 `owner/repo` 与 ref；失败结果不进缓存，所以"修好 token 后立刻重试"能成功。
-* `X-RateLimit-Remaining: 0` 时 `request_with_retry` **不做退避重试**：重试只会
-  再撞一次同一格配额，代价是用户多等几秒。
+省额度的两条实现细节（别顺手删掉）：`fetch_repo_meta` / `resolve_commit` 有 60 秒
+进程内缓存（键含 owner/repo 与 ref，失败不进缓存）；`X-RateLimit-Remaining: 0` 时
+`request_with_retry` **不做退避重试**（重试只会在同一格配额上再撞一次）。
 
 ## 2. 生成类
 

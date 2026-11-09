@@ -60,6 +60,19 @@ async def lifespan(app: FastAPI):
         log.error("migration_missing", hint="运行 `python -m repolearn.cli migrate` 或 `alembic upgrade head`")
     from repolearn.jobs.runner import reap_orphaned_generations, requeue_stale_jobs, start_runner, stop_runner
 
+    # 凭据发现要跑子进程（gh / git credential），启动时做一次而不是让第一个导入
+    # 去等它；失败只记一条日志，不影响启动（最坏情况是回到未认证 60 次/小时）。
+    try:
+        from repolearn.ingest.github_auth import warm_up_token
+
+        auth = await warm_up_token()
+        if auth.configured:
+            log.info("github_auth_ready", source=auth.source)
+        else:
+            log.warning("github_auth_missing", detail=auth.skipped_reason or ", ".join(auth.tried))
+    except Exception as exc:  # noqa: BLE001 - 凭据发现失败不该让 API 起不来
+        log.warning("github_auth_probe_failed", error=str(exc)[:200])
+
     try:
         await reap_orphaned_generations()
         await requeue_stale_jobs()

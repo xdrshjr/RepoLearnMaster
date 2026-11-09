@@ -36,10 +36,17 @@ def _no_cached_github_calls():
     `fetch_repo_meta` / `resolve_commit` 有 60 秒进程内缓存（省 60 次/小时的配额），
     而测试里"同一个 owner/repo"会在多条用例间重复出现。不清缓存的话，第二条
     用例会拿到第一条的响应——症状是"mock 明明设好了却没被调用"，最难查的那种。
+
+    凭据解析也有一层缓存（`github_auth._state`）：不清的话，改过
+    `settings.github_token` 之后 `token_diagnostics()` 仍然会返回上一个用例的结果。
     """
+    from repolearn.ingest.github_auth import reset_token_cache
+
     gh.reset_github_cache()
+    reset_token_cache()
     yield
     gh.reset_github_cache()
+    reset_token_cache()
 
 
 @pytest.fixture()

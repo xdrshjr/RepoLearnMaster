@@ -58,6 +58,15 @@ class Settings(BaseSettings):
     internal_token: str = ""
 
     github_token: str = ""
+    #: 本机已登录凭据的自动发现（`gh auth token` / Git Credential Manager / hosts.yml）。
+    #:
+    #: 为什么要有它：未认证配额是 60 次/小时（GitHub 硬规则），而开发机通常早就用
+    #: `gh auth login` 或 GCM 登录过 GitHub。只认 `.env` 会把"我已经登录了"的用户
+    #: 挡在门外，症状就是那句 `未认证上限 60 次/小时；剩余 0/60`。
+    #:
+    #: 默认开启，但**只对官方 api.github.com 生效**——把自己 github.com 的 token
+    #: 发给一个可配置的自建端点等于凭据外泄。显式的 `github_token` 永远优先。
+    github_token_autodiscover: bool = True
     max_repo_mb: int = 60
     # GitHub 接入点（hardening spec §3.2.1）。默认值就是官方站点，因此既有行为
     # 在"什么都不配"时逐字节不变；改成自建 GHE / 本地假端点时才生效。

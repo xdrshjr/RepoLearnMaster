@@ -555,6 +555,59 @@ def cmd_info(_args: argparse.Namespace) -> int:
     return 0
 
 
+async def _github_token(probe: bool, refresh: bool) -> int:
+    """打印"当前到底在用哪个 GitHub 凭据"，可选真实打一次 /rate_limit。
+
+    这条命令存在的理由：配额只有 60/h 时，"到底生效了没有"只能靠猜。它把答案
+    变成一行输出——来源、指纹、以及 GitHub 亲口说的 limit/remaining/reset。
+    """
+    from repolearn.ingest.github_auth import describe_failure, local_tooling, reset_token_cache, resolve_token
+
+    if refresh:
+        reset_token_cache()
+    auth = resolve_token(force=refresh)
+    if auth.configured:
+        print(f"source   : {auth.source}")
+        print(f"token    : {auth.fingerprint()} (length {len(auth.token)})")
+    else:
+        print("source   : none")
+        print(f"detail   : {describe_failure(auth)}")
+        tools = local_tooling()
+        print(f"gh       : {tools['gh'] or 'not installed'}")
+        print(f"git      : {tools['git'] or 'not installed'}")
+        print("fix      : `gh auth login` 或让 Git Credential Manager 记住 github.com，或在 .env 填 REPOLEARN_GITHUB_TOKEN")
+    if not probe:
+        return 0
+
+    import httpx
+
+    from repolearn.ingest import github as gh
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=False) as client:
+            resp = await client.get(f"{gh._api()}/rate_limit", headers=gh._headers())
+    except httpx.HTTPError as exc:
+        print(f"probe    : 请求失败 {exc.__class__.__name__}")
+        return 1
+    if resp.status_code >= 400:
+        print(f"probe    : HTTP {resp.status_code} {resp.text[:160]}")
+        return 1
+    body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+    core = ((body.get("resources") or {}).get("core") or {}) if isinstance(body, dict) else {}
+    limit = core.get("limit")
+    remaining = core.get("remaining")
+    print(f"probe    : HTTP {resp.status_code} limit={limit} remaining={remaining}")
+    if isinstance(limit, int) and limit <= 100:
+        print("verdict  : 仍是未认证配额（60/h）——token 没有被用上")
+        return 1
+    print("verdict  : 已按认证配额计费（5000/h 量级）")
+    return 0
+
+
+def cmd_github_token(args: argparse.Namespace) -> int:
+    return _run(_github_token(bool(args.probe), bool(args.refresh)))
+
+
 # --------------------------------------------------------------------------- #
 # 解析                                                                         #
 # --------------------------------------------------------------------------- #
@@ -693,6 +746,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     info = sub.add_parser("info", help="打印当前配置摘要")
     info.set_defaults(func=cmd_info)
+
+    gh_token = sub.add_parser(
+        "github-token",
+        help="打印当前生效的 GitHub 凭据来源（--probe 真实请求 /rate_limit 验证配额）",
+    )
+    gh_token.add_argument("--probe", action="store_true", help="真实打一次 GET /rate_limit 并打印 limit/remaining")
+    gh_token.add_argument("--refresh", action="store_true", help="忽略缓存，重新探测本机凭据")
+    gh_token.set_defaults(func=cmd_github_token)
 
     return parser
 

@@ -592,9 +592,10 @@ async def doctor(session) -> list[dict[str, Any]]:
             "hint": None if tts_ok else "未配置时课程自动切换为字幕推进模式",
         }
     )
-    # 「GitHub 凭据」这一项的判据是**进程里实际读到的值**，不是"文件里写了没"：
-    # 改完 .env 忘了重启 API 时，用户看到的就是"我明明配了它却说没配"。
+    # 「GitHub 凭据」这一项的判据是**进程里实际用到的凭据**，不是"文件里写了没"：
+    # 显式的 .env 值优先，其次是本机已登录凭据（gh CLI / Git Credential Manager）。
     from repolearn.ingest.github import token_diagnostics
+    from repolearn.ingest.github_auth import local_tooling
 
     token = token_diagnostics()
     if token["configured"]:
@@ -608,20 +609,22 @@ async def doctor(session) -> list[dict[str, Any]]:
             {
                 "name": "GitHub 凭据",
                 "status": "ok",
-                "detail": f"已配置 {token['fingerprint']}（长度 {token['length']}，上限 5000 次/小时）",
+                "detail": (
+                    f"已配置 {token['fingerprint']}（来源 {token['source']}，"
+                    f"长度 {token['length']}，上限 5000 次/小时）"
+                ),
                 "hint": token_hint,
             }
         )
     else:
+        tools = local_tooling()
+        fix = "`gh auth login`" if tools["gh"] else "让 Git Credential Manager 记住 github.com（`git config --global credential.helper manager` 后 `git ls-remote https://github.com/octocat/Hello-World`）"
         checks.append(
             {
                 "name": "GitHub 凭据",
                 "status": "degraded",
-                "detail": "未配置 → 未认证调用，上限 60 次/小时",
-                "hint": (
-                    "两步：① 在 .env 的 REPOLEARN_GITHUB_TOKEN= 后面粘贴 PAT；"
-                    "② .\\stop.ps1 然后 .\\start.ps1 -SkipInstall（改 .env 后必须重启 API 才生效）"
-                ),
+                "detail": "未找到凭据 → 未认证调用，上限 60 次/小时",
+                "hint": f"{token['detail']}；修法：{fix}，或直接在 .env 填 REPOLEARN_GITHUB_TOKEN，然后重启 API",
             }
         )
     checks.append(
